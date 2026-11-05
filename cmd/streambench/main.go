@@ -241,17 +241,23 @@ func collectSSE(body io.Reader, start, headerAt time.Time) streamStats {
 	for {
 		line, err := reader.ReadString('\n')
 		now := time.Now()
-		if err != nil {
-			if err != io.EOF {
-				log.Printf("read: %v", err)
-			}
+		// A final line can be returned together with io.EOF; process it first.
+		eof := err == io.EOF
+		if err != nil && !eof {
+			log.Printf("read: %v", err)
 			break
 		}
 		line = strings.TrimRight(line, "\r\n")
 		if line == "" || strings.HasPrefix(line, ":") {
+			if eof {
+				break
+			}
 			continue
 		}
 		if !strings.HasPrefix(line, "data: ") {
+			if eof {
+				break
+			}
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
@@ -293,6 +299,9 @@ func collectSSE(body io.Reader, start, headerAt time.Time) streamStats {
 			ev.RawPreview = data
 		}
 		st.Events = append(st.Events, ev)
+		if eof {
+			break
+		}
 	}
 	st.Total = time.Since(start)
 	return st

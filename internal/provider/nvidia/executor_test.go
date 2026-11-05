@@ -269,6 +269,45 @@ func TestExecuteStreamMockUpstream(t *testing.T) {
 	}
 }
 
+func TestExecuteStreamReportsPrematureEOF(t *testing.T) {
+	e := NewExecutor(Options{
+		FlagCaptcha: "P1_test",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"last\"}}]}")),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	})
+
+	stream, err := e.ExecuteStream(t.Context(), nil, clipexec.Request{
+		Model:   "moonshotai/kimi-k3_1-pro",
+		Payload: []byte(`{"model":"moonshotai/kimi-k3_1-pro","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, clipexec.Options{
+		Stream:       true,
+		SourceFormat: sdktranslator.FormatOpenAI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	var streamErr error
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			continue
+		}
+		output.Write(chunk.Payload)
+	}
+	if !strings.Contains(output.String(), "last") {
+		t.Fatalf("output = %q, want final delta", output.String())
+	}
+	if !errors.Is(streamErr, errStreamIncomplete) {
+		t.Fatalf("stream error = %v, want errStreamIncomplete", streamErr)
+	}
+}
+
 func TestUpstreamRetryOnInvalidToken(t *testing.T) {
 	var hits int
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

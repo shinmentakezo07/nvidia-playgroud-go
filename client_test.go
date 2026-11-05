@@ -11,6 +11,72 @@ import (
 	"nvidia-playgroud-go/internal/models"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestDoStreamProcessesFinalDeltaAtEOF(t *testing.T) {
+	client := New()
+	client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(
+				"data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n" +
+					"data: {\"choices\":[{\"delta\":{\"content\":\"last\"}}]}\n\n" +
+					"data: [DONE]",
+			)),
+			Header: make(http.Header),
+		}, nil
+	})
+
+	var content strings.Builder
+	var doneCount int
+	err := client.doStream(t.Context(), &ChatRequest{Model: DefaultModel}, func(chunk StreamChunk) {
+		if chunk.Error != nil {
+			t.Errorf("doStream() callback error = %v", chunk.Error)
+		}
+		content.WriteString(chunk.Content)
+		if chunk.Done {
+			doneCount++
+		}
+	})
+	if err != nil {
+		t.Fatalf("doStream() error = %v", err)
+	}
+	if got := content.String(); got != "firstlast" {
+		t.Fatalf("stream content = %q, want %q", got, "firstlast")
+	}
+	if doneCount != 1 {
+		t.Fatalf("done callbacks = %d, want 1", doneCount)
+	}
+}
+
+func TestDoStreamRejectsPrematureEOF(t *testing.T) {
+	client := New()
+	client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(
+				"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+			)),
+			Header: make(http.Header),
+		}, nil
+	})
+
+	var chunks []StreamChunk
+	err := client.doStream(t.Context(), &ChatRequest{Model: DefaultModel}, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk)
+	})
+	if err == nil || !strings.Contains(err.Error(), "[DONE]") {
+		t.Fatalf("doStream() error = %v, want premature EOF error", err)
+	}
+	if len(chunks) != 1 || chunks[0].Content != "partial" {
+		t.Fatalf("chunks = %#v, want partial content before the error", chunks)
+	}
+}
+
 func TestBuildRequestUsesCaptchaAuthentication(t *testing.T) {
 	client := New(WithCaptchaToken("test-captcha-token"))
 	chatRequest := &ChatRequest{

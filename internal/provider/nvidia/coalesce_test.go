@@ -3,6 +3,7 @@ package nvidia
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -128,6 +129,92 @@ func TestCoalesceSSEPassthroughWhenOff(t *testing.T) {
 	}
 	if !strings.Contains(body.String(), "Z") {
 		t.Fatalf("passthrough body=%q", body.String())
+	}
+}
+
+func TestCoalesceSSEFlushesPendingDeltaAtEOF(t *testing.T) {
+	for _, window := range []time.Duration{0, time.Hour} {
+		t.Run(window.String(), func(t *testing.T) {
+			upstream := "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\"last\"}}]}"
+			var content strings.Builder
+			err := coalesceSSEEvents(strings.NewReader(upstream), window, func(line string) error {
+				var chunk struct {
+					Choices []struct {
+						Delta struct {
+							Content string `json:"content"`
+						} `json:"delta"`
+					} `json:"choices"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err != nil {
+					t.Errorf("decode delta: %v", err)
+					return err
+				}
+				content.WriteString(chunk.Choices[0].Delta.Content)
+				return nil
+			})
+			if !errors.Is(err, errStreamIncomplete) {
+				t.Fatalf("error = %v, want errStreamIncomplete", err)
+			}
+			if got := content.String(); got != "firstlast" {
+				t.Fatalf("content = %q, want firstlast", got)
+			}
+		})
+	}
+}
+
+func TestCoalesceSSEStopsAtDoneWithoutWaitingForEOF(t *testing.T) {
+	for _, window := range []time.Duration{0, time.Hour} {
+		t.Run(window.String(), func(t *testing.T) {
+			reader, writer := io.Pipe()
+			go func() {
+				_, _ = io.WriteString(writer, "data: [DONE]\n\n")
+			}()
+			err := coalesceSSEEvents(reader, window, func(line string) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCoalesceSSEStopsAfterDoneWithoutNewline(t *testing.T) {
+	const upstream = "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\n" +
+		"data: [DONE]"
+	for _, window := range []time.Duration{0, time.Hour} {
+		t.Run(window.String(), func(t *testing.T) {
+			var events []string
+			if err := coalesceSSEEvents(strings.NewReader(upstream), window, func(line string) error {
+				events = append(events, line)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(events) == 0 || events[len(events)-1] != "data: [DONE]" {
+				t.Fatalf("events = %#v, want final [DONE]", events)
+			}
+		})
+	}
+}
+
+func TestCoalesceSSEEofBeforeDoneReturnsError(t *testing.T) {
+	for _, window := range []time.Duration{0, time.Hour} {
+		t.Run(window.String(), func(t *testing.T) {
+			var events []string
+			err := coalesceSSEEvents(strings.NewReader(
+				"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+			), window, func(line string) error {
+				events = append(events, line)
+				return nil
+			})
+			if !errors.Is(err, errStreamIncomplete) {
+				t.Fatalf("error = %v, want errStreamIncomplete", err)
+			}
+			if len(events) != 1 || !strings.Contains(events[0], "partial") {
+				t.Fatalf("events = %#v, want partial delta", events)
+			}
+		})
 	}
 }
 

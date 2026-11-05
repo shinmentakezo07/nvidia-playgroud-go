@@ -3,10 +3,13 @@ package nvidia
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"time"
 )
+
+var errStreamIncomplete = errors.New("stream ended before [DONE]")
 
 // coalesceSSEEvents reads upstream SSE and yields coalesced event lines
 // (without the trailing blank line). When window <= 0, lines are passed through.
@@ -20,8 +23,8 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 		err  error
 	}
 	ch := make(chan readResult, 16)
-	done := make(chan struct{})
-	defer close(done)
+	readerDone := make(chan struct{})
+	defer close(readerDone)
 
 	go func() {
 		reader := bufio.NewReaderSize(src, 64<<10)
@@ -30,14 +33,14 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 			if len(line) > 0 {
 				select {
 				case ch <- readResult{line: strings.TrimRight(line, "\r\n")}:
-				case <-done:
+				case <-readerDone:
 					return
 				}
 			}
 			if err != nil {
 				select {
 				case ch <- readResult{err: err}:
-				case <-done:
+				case <-readerDone:
 				}
 				return
 			}
@@ -49,6 +52,7 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 		timer     *time.Timer
 		timerC    <-chan time.Time
 		firstSent bool
+		doneSeen  bool
 	)
 	stopTimer := func() {
 		if timer != nil {
@@ -87,7 +91,10 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 			if rr.err != nil && rr.line == "" {
 				ferr := flushPending()
 				if rr.err == io.EOF {
-					return ferr
+					if ferr != nil {
+						return ferr
+					}
+					return errStreamIncomplete
 				}
 				if ferr != nil {
 					return ferr
@@ -107,6 +114,7 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 				if err := emit(line); err != nil {
 					return err
 				}
+				doneSeen = true
 
 			case strings.HasPrefix(line, "data: "):
 				data := strings.TrimPrefix(line, "data: ")
@@ -164,13 +172,16 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 				}
 			}
 
+			if doneSeen {
+				return nil
+			}
 			if rr.err != nil {
 				ferr := flushPending()
-				if rr.err == io.EOF {
-					return ferr
-				}
 				if ferr != nil {
 					return ferr
+				}
+				if rr.err == io.EOF {
+					return errStreamIncomplete
 				}
 				return rr.err
 			}
@@ -188,11 +199,14 @@ func pipeSSELines(src io.Reader, emit func(line string) error) error {
 				if errEmit := emit(trimmed); errEmit != nil {
 					return errEmit
 				}
+				if trimmed == "data: [DONE]" {
+					return nil
+				}
 			}
 		}
 		if err != nil {
 			if err == io.EOF {
-				return nil
+				return errStreamIncomplete
 			}
 			return err
 		}

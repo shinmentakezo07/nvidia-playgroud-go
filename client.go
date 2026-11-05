@@ -290,49 +290,46 @@ func (c *Client) doStream(ctx context.Context, req *ChatRequest, cb func(StreamC
 		return parseError(raw)
 	}
 
-	// Read SSE stream
+	// Read SSE stream. ReadString can return data together with io.EOF, so
+	// always process the line before handling the read error.
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				cb(StreamChunk{Done: true})
-				return nil
-			}
-			return fmt.Errorf("nvidia: read sse: %w", err)
-		}
-
 		line = strings.TrimSpace(line)
 
 		// Skip empty lines / comments
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
+		if line != "" && !strings.HasPrefix(line, ":") {
+			// data: [DONE]
+			if line == "data: [DONE]" {
+				cb(StreamChunk{Done: true})
+				return nil
+			}
+
+			// data: {...}
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				var chunk ChatChunk
+				if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+					cb(StreamChunk{Error: fmt.Errorf("nvidia: decode chunk: %w", err)})
+				} else {
+					sc := StreamChunk{}
+					if len(chunk.Choices) > 0 {
+						sc.Content = chunk.Choices[0].Delta.Content
+						sc.Reasoning = chunk.Choices[0].Delta.ReasoningContent
+					}
+					if chunk.Usage != nil {
+						sc.Usage = chunk.Usage
+					}
+					cb(sc)
+				}
+			}
 		}
 
-		// data: [DONE]
-		if line == "data: [DONE]" {
-			cb(StreamChunk{Done: true})
-			return nil
-		}
-
-		// data: {...}
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			var chunk ChatChunk
-			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				cb(StreamChunk{Error: fmt.Errorf("nvidia: decode chunk: %w", err)})
-				continue
+		if err != nil {
+			if err == io.EOF {
+				return fmt.Errorf("nvidia: stream ended before [DONE]: %w", io.ErrUnexpectedEOF)
 			}
-
-			sc := StreamChunk{}
-			if len(chunk.Choices) > 0 {
-				sc.Content = chunk.Choices[0].Delta.Content
-				sc.Reasoning = chunk.Choices[0].Delta.ReasoningContent
-			}
-			if chunk.Usage != nil {
-				sc.Usage = chunk.Usage
-			}
-			cb(sc)
+			return fmt.Errorf("nvidia: read sse: %w", err)
 		}
 	}
 }
