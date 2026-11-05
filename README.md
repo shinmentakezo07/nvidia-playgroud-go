@@ -12,6 +12,8 @@ NVIDIA Build Playground 的 Go 客户端和本地代理。支持多模型路由�
 go run ./cmd/serve -auto -addr :8080
 ```
 
+pl
+
 调用 OpenAI Chat Completions：
 
 ```bash
