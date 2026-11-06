@@ -158,7 +158,7 @@ func (c *Client) buildRequest(ctx context.Context, req *ChatRequest) (*http.Requ
 	return httpReq, nil
 }
 
-func (c *Client) applyDefaults(r *ChatRequest) {
+func (c *Client) applyDefaults(r *ChatRequest) error {
 	if r.Model == "" {
 		r.Model = c.model
 	}
@@ -174,43 +174,52 @@ func (c *Client) applyDefaults(r *ChatRequest) {
 	if r.TopP == 0 {
 		r.TopP = c.topP
 	}
+	level := c.reasoningEffort
+	if level == "" {
+		level = r.ReasoningEffort
+	}
+	if level != "" {
+		if err := reasoning.ValidateEffort(level); err != nil {
+			return fmt.Errorf("nvidia: %w", err)
+		}
+	}
 	if len(r.ChatTemplateKwargs) == 0 {
 		enable := true
 		if c.thinking != nil {
 			enable = *c.thinking
-		}
-		level := c.reasoningEffort
-		if level == "" {
-			level = r.ReasoningEffort
 		}
 		if c.thinking != nil || level != "" {
 			// Explicit control: use the knob this model actually accepts.
 			// kimi-k3_1-pro takes reasoning_effort at the request root.
 			if effort, ok := reasoning.TopLevelEffort(r.Model, level, enable); ok {
 				r.ReasoningEffort = effort
-				return
+				return nil
 			}
 			if level != "" {
 				if kw, ok := reasoning.EffortKwargs(r.Model, level); ok {
 					r.ChatTemplateKwargs = kw
 					r.ReasoningEffort = "" // consumed into the kwargs
-					return
+					return nil
 				}
 			}
 			if c.thinking != nil {
 				r.ChatTemplateKwargs = reasoning.ThinkingKwargs(r.Model, enable)
-				return
+				return nil
 			}
 		}
 		// Only inject thinking kwargs for models known to accept them
 		// (Capability.Thinking). Most of the current anonymous catalog
 		// (e.g. kimi-k3_1-pro) rejects chat_template_kwargs with 400.
 		info, _, err := c.modelInfo(r.Model)
-		if err != nil || info.Capability == nil || !info.Capability.Thinking {
-			return
+		if err != nil {
+			return fmt.Errorf("nvidia: %w", err)
+		}
+		if info.Capability == nil || !info.Capability.Thinking {
+			return nil
 		}
 		r.ChatTemplateKwargs = reasoning.ThinkingKwargs(r.Model, true)
 	}
+	return nil
 }
 
 // modelInfo resolves the NVCF invocation data for a request and the canonical
@@ -247,7 +256,9 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (*ChatResponse, e
 		Messages: messages,
 		Stream:   false,
 	}
-	c.applyDefaults(req)
+	if err := c.applyDefaults(req); err != nil {
+		return nil, err
+	}
 
 	var resp ChatResponse
 	if err := c.doRequest(ctx, req, &resp); err != nil {
@@ -282,7 +293,9 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, cb func(Str
 			ContinuousUsageStats: false, // usage once at end — less payload / cleaner clients
 		},
 	}
-	c.applyDefaults(req)
+	if err := c.applyDefaults(req); err != nil {
+		return err
+	}
 
 	return c.doStream(ctx, req, cb)
 }

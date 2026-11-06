@@ -1,6 +1,7 @@
 package reasoning
 
 import (
+	"strings"
 	"testing"
 
 	"nvidia-playgroud-go/internal/models"
@@ -90,10 +91,16 @@ func TestTopLevelEffort(t *testing.T) {
 		{"", false, "low"}, // kimi has no "none": lowest supported level
 		{"medium", true, "medium"},
 		{"max", true, "max"},
-		{"hgih", true, "low"}, // invalid level falls back to the default
+		{"hgih", true, ""}, // invalid level cannot select a profile
 	}
 	for _, tc := range cases {
 		got, ok := TopLevelEffort("moonshotai/kimi-k3_1-pro", tc.level, tc.enable)
+		if tc.want == "" {
+			if ok {
+				t.Fatalf("invalid level %q must not select a profile", tc.level)
+			}
+			continue
+		}
 		if !ok || got != tc.want {
 			t.Fatalf("level=%q enable=%v: got %q ok=%v, want %q", tc.level, tc.enable, got, ok, tc.want)
 		}
@@ -122,7 +129,7 @@ func TestNormalizeThinkingKimiKeepsTopLevelEffort(t *testing.T) {
 		"model":            "moonshotai/kimi-k3_1-pro",
 		"reasoning_effort": "high",
 	}
-	if dropped := NormalizeThinking(raw); len(dropped) != 0 {
+	if dropped, err := NormalizeThinking(raw); err != nil || len(dropped) != 0 {
 		t.Fatalf("kimi effort should be supported, dropped=%v", dropped)
 	}
 	if raw["reasoning_effort"] != "high" {
@@ -138,7 +145,7 @@ func TestNormalizeThinkingKimiAliasMapsToEffort(t *testing.T) {
 		"model":    "moonshotai/kimi-k3_1-pro",
 		"thinking": map[string]any{"type": "enabled"},
 	}
-	if dropped := NormalizeThinking(raw); len(dropped) != 0 {
+	if dropped, err := NormalizeThinking(raw); err != nil || len(dropped) != 0 {
 		t.Fatalf("dropped = %v", dropped)
 	}
 	if raw["reasoning_effort"] != "low" {
@@ -157,7 +164,7 @@ func TestNormalizeThinkingKimiKwargMovesToTopLevel(t *testing.T) {
 			"enable_thinking":  true,
 		},
 	}
-	if dropped := NormalizeThinking(raw); len(dropped) != 0 {
+	if dropped, err := NormalizeThinking(raw); err != nil || len(dropped) != 0 {
 		t.Fatalf("dropped = %v", dropped)
 	}
 	if raw["reasoning_effort"] != "max" {
@@ -174,7 +181,10 @@ func TestNormalizeThinkingReportsDroppedControls(t *testing.T) {
 		"reasoning_effort": "high",
 		"thinking":         map[string]any{"type": "enabled"},
 	}
-	dropped := NormalizeThinking(raw)
+	dropped, err := NormalizeThinking(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(dropped) != 2 || dropped[0] != "thinking" || dropped[1] != "reasoning_effort" {
 		t.Fatalf("dropped = %v", dropped)
 	}
@@ -191,12 +201,48 @@ func TestNormalizeThinkingSupportedModelDoesNotReport(t *testing.T) {
 		"model":            "deepseek-ai/deepseek-v4-pro-0813",
 		"reasoning_effort": "max",
 	}
-	if dropped := NormalizeThinking(raw); len(dropped) != 0 {
+	if dropped, err := NormalizeThinking(raw); err != nil || len(dropped) != 0 {
 		t.Fatalf("dropped = %v", dropped)
 	}
 	kw := raw["chat_template_kwargs"].(map[string]any)
 	if kw["reasoning_effort"] != "max" {
 		t.Fatalf("kwargs = %#v", kw)
+	}
+}
+
+func TestNormalizeThinkingRejectsConflictsAcrossAliases(t *testing.T) {
+	valid := map[string]any{
+		"model": "moonshotai/kimi-k3_1-pro",
+		"chat_template_kwargs": map[string]any{
+			"enable_thinking": true,
+		},
+		"thinking": map[string]any{"type": "disabled"},
+	}
+	if _, err := NormalizeThinking(valid); err != nil {
+		t.Fatalf("valid precedence must not become a conflict: %v", err)
+	}
+	for _, raw := range []map[string]any{
+		{
+			"model":           "moonshotai/kimi-k3_1-pro",
+			"enable_thinking": false,
+			"thinking":        map[string]any{"type": "enabled", "reasoning_effort": "high"},
+		},
+		{
+			"model":            "google/diffusiongemma-26b-a4b-it",
+			"thinking":         map[string]any{"type": "disabled"},
+			"reasoning_effort": "high",
+		},
+		{
+			"model":            "moonshotai/kimi-k3_1-pro",
+			"reasoning_effort": "high",
+			"chat_template_kwargs": map[string]any{
+				"enable_thinking": false,
+			},
+		},
+	} {
+		if _, err := NormalizeThinking(raw); err == nil || !strings.Contains(err.Error(), "conflicts") {
+			t.Errorf("raw = %#v: error = %v, want conflict", raw, err)
+		}
 	}
 }
 

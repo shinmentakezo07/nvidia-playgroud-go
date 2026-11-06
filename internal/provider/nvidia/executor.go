@@ -232,7 +232,7 @@ func (e *Executor) preparePayload(req clipexec.Request, opts clipexec.Options, s
 
 	body, err := NormalizeRequestBody(payload)
 	if err != nil {
-		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
+		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, err.Error())
 	}
 	body, err = forceStreamFlag(body, stream)
 	if err != nil {

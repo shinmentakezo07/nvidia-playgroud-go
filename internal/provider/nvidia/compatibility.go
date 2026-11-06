@@ -3,6 +3,7 @@ package nvidia
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
@@ -43,9 +44,60 @@ func translateToChat(source sdktranslator.Format, model string, request []byte, 
 		}
 	case sdktranslator.FormatClaude:
 		copyRawFields(chatBody, sourceBody, "temperature", "top_p")
+		// The SDK infers "auto" for enabled thinking without a budget,
+		// drops "none" when disabled, and invents xhigh for adaptive mode
+		// without output_config.effort. Retain the original switch so model
+		// normalization can select its default or minimum supported level.
+		if rawThinking, ok := sourceBody["thinking"]; ok {
+			var config struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(rawThinking, &config); err == nil {
+				switch strings.ToLower(strings.TrimSpace(config.Type)) {
+				case "disabled":
+					delete(chatBody, "reasoning_effort")
+					chatBody["enable_thinking"] = json.RawMessage("false")
+				case "enabled":
+					if !hasThinkingBudget(rawThinking) {
+						delete(chatBody, "reasoning_effort")
+					}
+				case "adaptive", "auto":
+					delete(chatBody, "reasoning_effort")
+					if rawOutput, ok := sourceBody["output_config"]; ok {
+						var output struct {
+							Effort string `json:"effort"`
+						}
+						if err := json.Unmarshal(rawOutput, &output); err == nil && output.Effort != "" {
+							configThinking := map[string]json.RawMessage{}
+							if err := json.Unmarshal(rawThinking, &configThinking); err != nil {
+								return nil, fmt.Errorf("decode thinking config: %w", err)
+							}
+							configThinking["reasoning_effort"], err = json.Marshal(output.Effort)
+							if err != nil {
+								return nil, fmt.Errorf("encode reasoning effort: %w", err)
+							}
+							rawThinking, err = json.Marshal(configThinking)
+							if err != nil {
+								return nil, fmt.Errorf("encode thinking config: %w", err)
+							}
+						}
+					}
+				}
+				chatBody["thinking"] = rawThinking
+			}
+		}
 	}
 
 	return json.Marshal(chatBody)
+}
+
+func hasThinkingBudget(raw json.RawMessage) bool {
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return false
+	}
+	budget, ok := config["budget_tokens"]
+	return ok && string(budget) != "null"
 }
 
 func copyRawFields(destination, source map[string]json.RawMessage, fields ...string) {

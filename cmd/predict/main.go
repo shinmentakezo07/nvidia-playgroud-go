@@ -347,6 +347,9 @@ func (c *config) requestBody(model string, msgs []nvidia.Message) ([]byte, error
 		Stream:      c.stream,
 	}
 	if c.reasoningEffort != "" {
+		if err := reasoning.ValidateEffort(c.reasoningEffort); err != nil {
+			return nil, fmt.Errorf("invalid -reasoning-effort: %w", err)
+		}
 		if effort, ok := reasoning.TopLevelEffort(model, c.reasoningEffort, true); ok {
 			req.ReasoningEffort = effort
 		} else if kw, ok := reasoning.EffortKwargs(model, c.reasoningEffort); ok {
@@ -396,6 +399,9 @@ func sendOnce(ctx context.Context, c *config, info models.ModelInfo, model, toke
 		return fmt.Errorf("-thinking must be auto|on|off, got %q", c.thinking)
 	}
 	if c.reasoningEffort != "" {
+		if err := reasoning.ValidateEffort(c.reasoningEffort); err != nil {
+			return fmt.Errorf("invalid -reasoning-effort: %w", err)
+		}
 		opts = append(opts, nvidia.WithReasoningEffort(c.reasoningEffort))
 	}
 	client := nvidia.New(opts...)

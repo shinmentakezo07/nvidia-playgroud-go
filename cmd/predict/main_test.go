@@ -197,6 +197,13 @@ func TestBuildMessages(t *testing.T) {
 	})
 }
 
+func TestRequestBodyRejectsInvalidReasoningEffort(t *testing.T) {
+	_, err := (&config{reasoningEffort: "hgih"}).requestBody("moonshotai/kimi-k3_1-pro", []nvidia.Message{{Role: nvidia.RoleUser, Content: "test"}})
+	if err == nil || !strings.Contains(err.Error(), "invalid reasoning_effort") {
+		t.Fatalf("requestBody() error = %v, want invalid effort", err)
+	}
+}
+
 func TestCurlCommand(t *testing.T) {
 	info := models.ModelInfo{Namespace: "ns1", Slug: "sl1", FunctionID: "fid1"}
 	cmd := curlCommand(info, "P1_tok", []byte(`{"model":"a/b","messages":[{"role":"user","content":"it's"}]}`))

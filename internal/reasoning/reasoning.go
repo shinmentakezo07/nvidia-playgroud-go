@@ -8,6 +8,7 @@
 package reasoning
 
 import (
+	"fmt"
 	"strings"
 
 	"nvidia-playgroud-go/internal/models"
@@ -116,6 +117,13 @@ func ThinkingKwargs(model string, enable bool) map[string]any {
 	return nil
 }
 
+// ValidateEffort reports whether level is a recognized client effort.
+// Use it before calling TopLevelEffort or EffortKwargs, whose false result
+// also covers models that do not support the requested native knob.
+func ValidateEffort(level string) error {
+	return validateEffort(level, "reasoning_effort")
+}
+
 // TopLevelEffort reports whether model takes reasoning_effort at the request
 // root and returns the value to send. level is an explicit requested effort
 // (may be empty); otherwise enable picks the model default or the lowest
@@ -126,9 +134,11 @@ func TopLevelEffort(model, level string, enable bool) (string, bool) {
 		return "", false
 	}
 	if level != "" {
-		if normalized, ok := normalizeEffort(level); ok {
-			return mapEffort(normalized, p)
+		normalized, ok := normalizeEffort(level)
+		if !ok {
+			return "", false
 		}
+		return mapEffort(normalized, p)
 	}
 	return mapEnabled(enable, p)
 }
@@ -168,15 +178,11 @@ func EffortKwargs(model, level string) (map[string]any, bool) {
 	return nil, false
 }
 
-// NormalizeThinking folds the common client aliases (thinking,
-// enable_thinking, clear_thinking, reasoning_effort) into the knob the model
-// accepts: chat_template_kwargs for most models, a top-level
-// reasoning_effort for kimi.
-//
-// The alias keys are always removed from raw because the upstream rejects
-// them. When the model has no known reasoning support they are reported back
-// to the caller instead of disappearing silently; the caller can log them.
-func NormalizeThinking(raw map[string]any) []string {
+// NormalizeThinking folds client aliases into the model's native reasoning
+// controls. Invalid explicit values and conflicting controls are rejected
+// rather than silently ignored or rounded to the model default.
+// Aliases for unsupported models are stripped and returned for logging.
+func NormalizeThinking(raw map[string]any) ([]string, error) {
 	model, _ := raw["model"].(string)
 	p, supported := profileFor(model)
 	kw, hadKwargs := raw["chat_template_kwargs"].(map[string]any)
@@ -187,7 +193,11 @@ func NormalizeThinking(raw map[string]any) []string {
 	effort, hasEffort := requestedEffort(raw, kw)
 	enabled, hasEnabled := requestedThinkingEnabled(raw, kw)
 	clearThinking, hasClearThinking := requestedClearThinking(raw, kw)
-
+	if supported {
+		if err := validateRequested(raw, kw); err != nil {
+			return nil, err
+		}
+	}
 	var dropped []string
 	for _, key := range []string{"thinking", "enable_thinking", "clear_thinking", "reasoning_effort"} {
 		if _, ok := raw[key]; ok && !supported {
@@ -269,7 +279,93 @@ func NormalizeThinking(raw map[string]any) []string {
 	} else {
 		delete(raw, "chat_template_kwargs")
 	}
-	return dropped
+	return dropped, nil
+}
+
+// validateRequested rejects unknown effort and conflicting controls.
+// It checks all supplied aliases, including those losing precedence.
+func validateRequested(raw, kw map[string]any) error {
+	for _, field := range []struct {
+		value any
+		name  string
+	}{
+		{kw["reasoning_effort"], "chat_template_kwargs.reasoning_effort"},
+		{raw["reasoning_effort"], "reasoning_effort"},
+	} {
+		if err := validateEffort(field.value, field.name); err != nil {
+			return err
+		}
+	}
+	thinking, _ := raw["thinking"].(map[string]any)
+	if err := validateEffort(thinking["reasoning_effort"], "thinking.reasoning_effort"); err != nil {
+		return err
+	}
+	if value, ok := thinking["type"]; ok {
+		typ, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("thinking.type must be a string")
+		}
+		switch strings.ToLower(strings.TrimSpace(typ)) {
+		case "enabled", "enable", "on", "disabled", "disable", "off", "auto", "adaptive":
+		default:
+			return fmt.Errorf("invalid thinking.type %q", typ)
+		}
+	}
+	for _, field := range []struct {
+		value any
+		name  string
+	}{
+		{kw["enable_thinking"], "chat_template_kwargs.enable_thinking"},
+		{raw["enable_thinking"], "enable_thinking"},
+	} {
+		if field.value == nil {
+			continue
+		}
+		enabled, ok := field.value.(bool)
+		if !ok {
+			return fmt.Errorf("%s must be a boolean", field.name)
+		}
+		if !enabled && hasEnabledEffort(raw, kw) {
+			return fmt.Errorf("disabled thinking conflicts with explicit reasoning_effort")
+		}
+	}
+	if typ, ok := thinking["type"].(string); ok && isDisabledThinkingType(typ) && hasEnabledEffort(raw, kw) {
+		return fmt.Errorf("disabled thinking conflicts with explicit reasoning_effort")
+	}
+	return nil
+}
+
+func hasEnabledEffort(raw, kw map[string]any) bool {
+	thinking, _ := raw["thinking"].(map[string]any)
+	for _, value := range []any{raw["reasoning_effort"], kw["reasoning_effort"], thinking["reasoning_effort"]} {
+		if effort, ok := value.(string); ok {
+			normalized, valid := normalizeEffort(effort)
+			return valid && effortEnablesThinking(normalized)
+		}
+	}
+	return false
+}
+
+func isDisabledThinkingType(typ string) bool {
+	switch strings.ToLower(strings.TrimSpace(typ)) {
+	case "disabled", "disable", "off":
+		return true
+	}
+	return false
+}
+
+func validateEffort(value any, name string) error {
+	if value == nil {
+		return nil
+	}
+	effort, ok := value.(string)
+	if !ok {
+		return fmt.Errorf("%s must be a string", name)
+	}
+	if _, ok := normalizeEffort(effort); !ok {
+		return fmt.Errorf("invalid reasoning_effort %q", effort)
+	}
+	return nil
 }
 
 func requestedEffort(raw, kw map[string]any) (string, bool) {
@@ -297,7 +393,7 @@ func requestedThinkingEnabled(raw, kw map[string]any) (bool, bool) {
 	if thinking, ok := raw["thinking"].(map[string]any); ok {
 		if typ, ok := thinking["type"].(string); ok {
 			switch strings.ToLower(strings.TrimSpace(typ)) {
-			case "enabled", "enable", "on":
+			case "enabled", "enable", "on", "auto", "adaptive":
 				return true, true
 			case "disabled", "disable", "off":
 				return false, true

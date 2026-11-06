@@ -140,7 +140,9 @@ func TestApplyDefaultsSkipsThinkingForUnverifiedModel(t *testing.T) {
 	// client must NOT inject chat_template_kwargs (upstream 400s on it).
 	client := New(WithCaptchaToken("t"))
 	req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
-	client.applyDefaults(req)
+	if err := client.applyDefaults(req); err != nil {
+		t.Fatal(err)
+	}
 	if len(req.ChatTemplateKwargs) != 0 {
 		t.Fatalf("chat_template_kwargs = %#v, want none for unverified model", req.ChatTemplateKwargs)
 	}
@@ -151,7 +153,9 @@ func TestApplyDefaultsEnablesThinkingWhenExplicit(t *testing.T) {
 	// is covered by TestApplyDefaultsKimiUsesTopLevelEffort.
 	client := New(WithCaptchaToken("t"), WithModel("google/diffusiongemma-26b-a4b-it"), WithThinking(true))
 	req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
-	client.applyDefaults(req)
+	if err := client.applyDefaults(req); err != nil {
+		t.Fatal(err)
+	}
 	if req.ChatTemplateKwargs["enable_thinking"] != true {
 		t.Fatalf("enable_thinking = %#v, want true", req.ChatTemplateKwargs["enable_thinking"])
 	}
@@ -163,7 +167,9 @@ func TestApplyDefaultsEnablesThinkingWhenExplicit(t *testing.T) {
 func TestWithThinkingFalse(t *testing.T) {
 	client := New(WithCaptchaToken("t"), WithThinking(false))
 	req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
-	client.applyDefaults(req)
+	if err := client.applyDefaults(req); err != nil {
+		t.Fatal(err)
+	}
 	if req.ChatTemplateKwargs != nil {
 		t.Fatalf("ChatTemplateKwargs = %#v, want nil when thinking disabled", req.ChatTemplateKwargs)
 	}
@@ -175,7 +181,9 @@ func TestApplyDefaultsPreservesCallerKwargs(t *testing.T) {
 		Messages:           []Message{{Role: RoleUser, Content: "Hi"}},
 		ChatTemplateKwargs: map[string]any{"enable_thinking": false},
 	}
-	client.applyDefaults(req)
+	if err := client.applyDefaults(req); err != nil {
+		t.Fatal(err)
+	}
 	if req.ChatTemplateKwargs["enable_thinking"] != false {
 		t.Fatalf("got %#v", req.ChatTemplateKwargs)
 	}
@@ -187,7 +195,9 @@ func TestApplyDefaultsFillsEmptyKwargsWhenExplicit(t *testing.T) {
 		Messages:           []Message{{Role: RoleUser, Content: "Hi"}},
 		ChatTemplateKwargs: map[string]any{},
 	}
-	client.applyDefaults(req)
+	if err := client.applyDefaults(req); err != nil {
+		t.Fatal(err)
+	}
 	if req.ChatTemplateKwargs["enable_thinking"] != true {
 		t.Fatalf("empty kwargs should get defaults, got %#v", req.ChatTemplateKwargs)
 	}
@@ -213,7 +223,9 @@ func TestApplyDefaultsMapsThinkingPerModel(t *testing.T) {
 	for _, tc := range cases {
 		client := New(WithCaptchaToken("t"), WithModel(tc.model), WithThinking(tc.enable))
 		req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
-		client.applyDefaults(req)
+		if err := client.applyDefaults(req); err != nil {
+			t.Fatal(err)
+		}
 		if got := req.ChatTemplateKwargs[tc.key]; got != tc.want {
 			t.Errorf("%s enable=%v: %s = %#v, want %#v (kwargs %#v)",
 				tc.model, tc.enable, tc.key, got, tc.want, req.ChatTemplateKwargs)
@@ -241,7 +253,9 @@ func TestApplyDefaultsKimiUsesTopLevelEffort(t *testing.T) {
 		opts := append([]Option{WithCaptchaToken("t"), WithModel("moonshotai/kimi-k3_1-pro")}, tc.opts...)
 		client := New(opts...)
 		req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
-		client.applyDefaults(req)
+		if err := client.applyDefaults(req); err != nil {
+			t.Fatal(err)
+		}
 		if req.ReasoningEffort != tc.want {
 			t.Errorf("%s: ReasoningEffort = %q, want %q", tc.name, req.ReasoningEffort, tc.want)
 		}
@@ -251,10 +265,28 @@ func TestApplyDefaultsKimiUsesTopLevelEffort(t *testing.T) {
 	}
 }
 
+func TestClientRejectsInvalidReasoningEffortBeforeHTTP(t *testing.T) {
+	client := New(
+		WithCaptchaToken("t"),
+		WithModel("moonshotai/kimi-k3_1-pro"),
+		WithReasoningEffort("hgih"),
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("invalid effort must fail before an HTTP request")
+			return nil, nil
+		})}),
+	)
+	_, err := client.Chat(t.Context(), []Message{{Role: RoleUser, Content: "Hi"}})
+	if err == nil || !strings.Contains(err.Error(), "invalid reasoning_effort") {
+		t.Fatalf("Chat() error = %v, want invalid reasoning_effort", err)
+	}
+}
+
 func TestBuildRequestKimiWireModel(t *testing.T) {
 	client := New(WithCaptchaToken("t"), WithModel("moonshotai/kimi-k3_1-pro"))
 	req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
-	client.applyDefaults(req)
+	if err := client.applyDefaults(req); err != nil {
+		t.Fatal(err)
+	}
 	httpReq, err := client.buildRequest(context.Background(), req)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
@@ -339,7 +371,9 @@ func TestBuildRequestAppliesFunctionPin(t *testing.T) {
 	client := New(WithCaptchaToken("t"), WithModel(pinned+"@"+DefaultModel))
 
 	req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
-	client.applyDefaults(req)
+	if err := client.applyDefaults(req); err != nil {
+		t.Fatal(err)
+	}
 	httpReq, err := client.buildRequest(context.Background(), req)
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)

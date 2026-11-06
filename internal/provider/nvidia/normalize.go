@@ -23,7 +23,11 @@ func NormalizeRequestBody(body []byte) ([]byte, error) {
 		return nil, err
 	}
 	model, _ := raw["model"].(string)
-	if dropped := reasoning.NormalizeThinking(raw); len(dropped) > 0 {
+	dropped, err := reasoning.NormalizeThinking(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(dropped) > 0 {
 		reportDroppedReasoning(model, dropped)
 	}
 	stream, _ := raw["stream"].(bool)

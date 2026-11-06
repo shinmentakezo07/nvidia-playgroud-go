@@ -2,6 +2,7 @@ package nvidia
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -109,14 +110,15 @@ func TestNormalizeThinkingKwargsAliases(t *testing.T) {
 			stripped: []string{"thinking", "enable_thinking"},
 		},
 		{
-			name: "disabled thinking removes conflicting effort",
-			in:   `{"model":"google/diffusiongemma-26b-a4b-it","stream":false,"chat_template_kwargs":{"enable_thinking":false},"reasoning_effort":"high"}`,
+			name: "disabled thinking plus none is consistent",
+			in:   `{"model":"google/diffusiongemma-26b-a4b-it","stream":false,"chat_template_kwargs":{"enable_thinking":false},"reasoning_effort":"none"}`,
 			want: map[string]any{
 				"enable_thinking": false,
 			},
 			stripped: []string{"reasoning_effort"},
 		},
 	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := NormalizeRequestBody([]byte(tc.in))
@@ -241,27 +243,14 @@ func TestNormalizeRequestBodyKimiThinkingAlias(t *testing.T) {
 	}
 }
 
-func TestNormalizeThinkingIgnoresUnknownEffort(t *testing.T) {
-	// A typo must not round to the model default: for an effort model it
-	// would silently raise thinking, for a toggle model it would turn it on.
-	cases := []string{
+func TestNormalizeThinkingRejectsUnknownEffort(t *testing.T) {
+	for _, in := range []string{
 		`{"model":"deepseek-ai/deepseek-v4-pro-0813","reasoning_effort":"hgih","stream":false}`,
 		`{"model":"google/diffusiongemma-26b-a4b-it","reasoning_effort":"hgih","stream":false}`,
-	}
-	for _, in := range cases {
-		out, err := NormalizeRequestBody([]byte(in))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var raw map[string]any
-		if err := json.Unmarshal(out, &raw); err != nil {
-			t.Fatal(err)
-		}
-		if kw, ok := raw["chat_template_kwargs"].(map[string]any); ok && len(kw) != 0 {
-			t.Fatalf("in=%s unknown effort produced kwargs %#v", in, kw)
-		}
-		if _, ok := raw["reasoning_effort"]; ok {
-			t.Fatalf("in=%s reasoning_effort alias leaked upstream", in)
+	} {
+		_, err := NormalizeRequestBody([]byte(in))
+		if err == nil || !strings.Contains(err.Error(), "invalid reasoning_effort") {
+			t.Fatalf("in=%s error=%v, want invalid reasoning_effort", in, err)
 		}
 	}
 }
