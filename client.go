@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -82,9 +83,10 @@ func WithDefaults(maxTokens int, seed int, temp, topP float64) Option {
 
 // WithThinking forces thinking mode (reasoning_content) on or off. The knob
 // is model-specific: reasoning_effort for deepseek/nemotron, enable_thinking
-// for toggle models, thinking_mode for minimax. Without it, thinking kwargs
-// are injected only for models that declare the Thinking capability (most of
-// the current anonymous catalog rejects thinking kwargs with 400).
+// for toggle models, thinking_mode for minimax. Enabling without an explicit
+// level requests low, rounded up when the model does not support low. Without
+// an explicit option, thinking kwargs are injected only for models that
+// declare the Thinking capability (most reject thinking kwargs with 400).
 func WithThinking(enable bool) Option {
 	return func(c *Client) { c.thinking = &enable }
 }
@@ -93,6 +95,7 @@ func WithThinking(enable bool) Option {
 // high, max, or none where the model supports it). It takes precedence over
 // WithThinking and is mapped to the knob the model accepts: a top-level
 // reasoning_effort for kimi, chat_template_kwargs for the other models.
+// Kimi forwards its supported low, high, and max values unchanged.
 func WithReasoningEffort(level string) Option {
 	return func(c *Client) { c.reasoningEffort = level }
 }
@@ -174,6 +177,10 @@ func (c *Client) applyDefaults(r *ChatRequest) error {
 	if r.TopP == 0 {
 		r.TopP = c.topP
 	}
+	info, model, err := c.modelInfo(r.Model)
+	if err != nil {
+		return fmt.Errorf("nvidia: %w", err)
+	}
 	level := c.reasoningEffort
 	if level == "" {
 		level = r.ReasoningEffort
@@ -183,42 +190,43 @@ func (c *Client) applyDefaults(r *ChatRequest) error {
 			return fmt.Errorf("nvidia: %w", err)
 		}
 	}
-	if len(r.ChatTemplateKwargs) == 0 {
-		enable := true
-		if c.thinking != nil {
-			enable = *c.thinking
-		}
-		if c.thinking != nil || level != "" {
-			// Explicit control: use the knob this model actually accepts.
-			// kimi-k3_1-pro takes reasoning_effort at the request root.
-			if effort, ok := reasoning.TopLevelEffort(r.Model, level, enable); ok {
-				r.ReasoningEffort = effort
-				return nil
-			}
-			if level != "" {
-				if kw, ok := reasoning.EffortKwargs(r.Model, level); ok {
-					r.ChatTemplateKwargs = kw
-					r.ReasoningEffort = "" // consumed into the kwargs
-					return nil
-				}
-			}
-			if c.thinking != nil {
-				r.ChatTemplateKwargs = reasoning.ThinkingKwargs(r.Model, enable)
-				return nil
-			}
-		}
-		// Only inject thinking kwargs for models known to accept them
-		// (Capability.Thinking). Most of the current anonymous catalog
-		// (e.g. kimi-k3_1-pro) rejects chat_template_kwargs with 400.
-		info, _, err := c.modelInfo(r.Model)
-		if err != nil {
-			return fmt.Errorf("nvidia: %w", err)
-		}
-		if info.Capability == nil || !info.Capability.Thinking {
+	enable := true
+	if c.thinking != nil {
+		enable = *c.thinking
+	}
+	if c.thinking != nil || level != "" {
+		// Explicit client controls take precedence over kwargs. Preserve
+		// unrelated caller kwargs rather than replacing the whole map.
+		if effort, ok := reasoning.TopLevelEffort(model, level, enable); ok {
+			r.ReasoningEffort = effort
 			return nil
 		}
-		r.ChatTemplateKwargs = reasoning.ThinkingKwargs(r.Model, true)
+		if level != "" {
+			if kw, ok := reasoning.EffortKwargs(model, level); ok {
+				if r.ChatTemplateKwargs == nil {
+					r.ChatTemplateKwargs = map[string]any{}
+				}
+				maps.Copy(r.ChatTemplateKwargs, kw)
+				r.ReasoningEffort = "" // consumed into the kwargs
+				return nil
+			}
+		}
+		if c.thinking != nil {
+			kw := reasoning.ThinkingKwargs(model, enable)
+			if r.ChatTemplateKwargs == nil && len(kw) > 0 {
+				r.ChatTemplateKwargs = map[string]any{}
+			}
+			maps.Copy(r.ChatTemplateKwargs, kw)
+			return nil
+		}
 	}
+	if len(r.ChatTemplateKwargs) != 0 {
+		return nil
+	}
+	if info.Capability == nil || !info.Capability.Thinking {
+		return nil
+	}
+	r.ChatTemplateKwargs = reasoning.ThinkingKwargs(model, true)
 	return nil
 }
 

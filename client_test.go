@@ -214,7 +214,7 @@ func TestApplyDefaultsMapsThinkingPerModel(t *testing.T) {
 	}{
 		{"deepseek-ai/deepseek-v4-pro-0813", true, "reasoning_effort", "high"},
 		{"deepseek-ai/deepseek-v4-pro-0813", false, "reasoning_effort", "none"},
-		{"nvidia/nemotron-3-ultra-550b-a55b", true, "reasoning_effort", "high"},
+		{"nvidia/nemotron-3-ultra-550b-a55b", true, "reasoning_effort", "medium"},
 		{"minimaxai/minimax-m3", true, "thinking_mode", "enabled"},
 		{"minimaxai/minimax-m3", false, "thinking_mode", "disabled"},
 		{"google/diffusiongemma-26b-a4b-it", true, "enable_thinking", true},
@@ -262,6 +262,85 @@ func TestApplyDefaultsKimiUsesTopLevelEffort(t *testing.T) {
 		if len(req.ChatTemplateKwargs) != 0 {
 			t.Errorf("%s: kimi must not receive kwargs, got %#v", tc.name, req.ChatTemplateKwargs)
 		}
+	}
+}
+
+func TestClientPinnedAndCallerKwargsPreserveRequestedEffort(t *testing.T) {
+	const pin = "4f1a2b3c-0000-4000-8000-000000000001"
+	for _, effort := range []string{"low", "high", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			client := New(
+				WithModel(pin+"@moonshotai/kimi-k3_1-pro"),
+				WithReasoningEffort(effort),
+				WithThinking(true),
+				WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					var raw map[string]any
+					payload, err := io.ReadAll(req.Body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := json.Unmarshal(payload, &raw); err != nil {
+						t.Fatal(err)
+					}
+					if raw["reasoning_effort"] != effort {
+						t.Errorf("reasoning_effort = %#v, want %q; body=%s", raw["reasoning_effort"], effort, payload)
+					}
+					if raw["model"] != models.RequestModel(DefaultModel) {
+						t.Errorf("model = %#v, want canonical Kimi wire model", raw["model"])
+					}
+					if raw["chat_template_kwargs"] != nil {
+						t.Errorf("unexpected reasoning kwargs: %s", raw)
+					}
+					if req.Header.Get("nv-function-id") != pin {
+						t.Errorf("function id = %q, want %q", req.Header.Get("nv-function-id"), pin)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[]}`)), Header: http.Header{}}, nil
+				})}),
+			)
+			if _, err := client.Chat(t.Context(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestClientEffortDoesNotGetSuppressedByCallerKwargs(t *testing.T) {
+	client := New(WithReasoningEffort("max"))
+	req := &ChatRequest{
+		Model:              "moonshotai/kimi-k3_1-pro",
+		ChatTemplateKwargs: map[string]any{"seed": 42},
+	}
+	if err := client.applyDefaults(req); err != nil {
+		t.Fatal(err)
+	}
+	if req.ReasoningEffort != "max" || req.ChatTemplateKwargs["seed"] != 42 {
+		t.Fatalf("effort = %q, kwargs = %#v; want max and preserved kwargs", req.ReasoningEffort, req.ChatTemplateKwargs)
+	}
+}
+
+func TestClientReasoningDefaultsToLowAndPreservesExplicitLevels(t *testing.T) {
+	for _, effort := range []string{"", "low", "high", "max"} {
+		name := effort
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			client := New(WithModel("moonshotai/kimi-k3_1-pro"), WithThinking(true))
+			if effort != "" {
+				client = New(WithModel("moonshotai/kimi-k3_1-pro"), WithReasoningEffort(effort))
+			}
+			req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}
+			if err := client.applyDefaults(req); err != nil {
+				t.Fatal(err)
+			}
+			want := effort
+			if want == "" {
+				want = "low"
+			}
+			if req.ReasoningEffort != want {
+				t.Fatalf("effort = %q, want %q", req.ReasoningEffort, want)
+			}
+		})
 	}
 }
 

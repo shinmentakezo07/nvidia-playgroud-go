@@ -172,23 +172,34 @@ func TestPreparePayloadClaudeDisabledThinking(t *testing.T) {
 	}
 }
 
-func TestPreparePayloadRejectsConflictingReasoningControls(t *testing.T) {
+func TestPreparePayloadRejectsEffectiveConflictingReasoningControls(t *testing.T) {
 	_, _, err := NewExecutor(Options{}).preparePayload(clipexec.Request{
 		Model:   "moonshotai/kimi-k3_1-pro",
-		Payload: []byte(`{"model":"moonshotai/kimi-k3_1-pro","enable_thinking":false,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`),
+		Payload: []byte(`{"model":"moonshotai/kimi-k3_1-pro","chat_template_kwargs":{"enable_thinking":false,"reasoning_effort":"high"},"messages":[{"role":"user","content":"hi"}]}`),
 	}, clipexec.Options{SourceFormat: sdktranslator.FormatOpenAI}, false)
 	if err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatalf("error = %v, want conflicting disabled thinking and high effort", err)
 	}
 }
 
-func TestPreparePayloadRejectsLowerPriorityConflictingReasoningControls(t *testing.T) {
-	_, _, err := NewExecutor(Options{}).preparePayload(clipexec.Request{
-		Model:   "moonshotai/kimi-k3_1-pro",
-		Payload: []byte(`{"model":"moonshotai/kimi-k3_1-pro","enable_thinking":false,"thinking":{"type":"enabled","reasoning_effort":"high"},"messages":[{"role":"user","content":"hi"}]}`),
-	}, clipexec.Options{SourceFormat: sdktranslator.FormatOpenAI}, false)
-	if err == nil || !strings.Contains(err.Error(), "conflicts") {
-		t.Fatalf("error = %v, want conflict from every supplied alias", err)
+func TestPreparePayloadEffortOverridesSameSourceDisabledThinking(t *testing.T) {
+	for _, effort := range []string{"low", "high", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			body, _, err := NewExecutor(Options{}).preparePayload(clipexec.Request{
+				Model:   "moonshotai/kimi-k3_1-pro",
+				Payload: []byte(`{"model":"moonshotai/kimi-k3_1-pro","enable_thinking":false,"reasoning_effort":"` + effort + `","messages":[{"role":"user","content":"hi"}]}`),
+			}, clipexec.Options{SourceFormat: sdktranslator.FormatOpenAI}, false)
+			if err != nil {
+				t.Fatalf("same-source switch must not reject explicit effort: %v", err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				t.Fatal(err)
+			}
+			if raw["reasoning_effort"] != effort {
+				t.Fatalf("reasoning_effort = %#v, want %s: %s", raw["reasoning_effort"], effort, body)
+			}
+		})
 	}
 }
 
@@ -209,6 +220,23 @@ func TestPreparePayloadRejectsUnsupportedReasoningForUnlistedTarget(t *testing.T
 	}
 	if !strings.Contains(apiErr.Message, "acme/unlisted") || !strings.Contains(apiErr.Message, "reasoning_effort") {
 		t.Fatalf("error = %q, want unsupported reasoning control for the unlisted target", apiErr.Message)
+	}
+}
+
+func TestPreparePayloadRejectsNestedUnsupportedReasoningForUnlistedTarget(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(headerFunctionID, pinnedFunction)
+	headers.Set(headerFunctionSlug, "acme/unlisted")
+	_, _, err := NewExecutor(Options{}).preparePayload(clipexec.Request{
+		Model:   "moonshotai/kimi-k3_1-pro",
+		Payload: []byte(`{"model":"moonshotai/kimi-k3_1-pro","chat_template_kwargs":{"reasoning_effort":"high"},"messages":[{"role":"user","content":"hi"}]}`),
+	}, clipexec.Options{SourceFormat: sdktranslator.FormatOpenAI, Headers: headers}, false)
+	var apiErr *coreauth.Error
+	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("error = %v (%T), want HTTP 400", err, err)
+	}
+	if !strings.Contains(apiErr.Message, "chat_template_kwargs.reasoning_effort") {
+		t.Fatalf("error = %q, want nested unsupported control", apiErr.Message)
 	}
 }
 

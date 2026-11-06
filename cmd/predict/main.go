@@ -122,7 +122,7 @@ func run() error {
 	fs.IntVar(&c.seed, "seed", 42, "seed")
 	fs.Float64Var(&c.temp, "temperature", 1.0, "temperature")
 	fs.Float64Var(&c.topP, "top-p", 0, "top_p (0 = omit; some models 400 on it)")
-	fs.StringVar(&c.thinking, "thinking", "auto", "reasoning kwargs: auto|on|off (auto = only for models that declare support)")
+	fs.StringVar(&c.thinking, "thinking", "auto", "reasoning: auto|on|off (on defaults to low; auto = only for models that declare support)")
 	fs.StringVar(&c.reasoningEffort, "reasoning-effort", "", "explicit reasoning level (low|medium|high|max or none); overrides -thinking")
 
 	fs.IntVar(&c.requests, "n", 1, "number of requests; each mints its own one-shot token")

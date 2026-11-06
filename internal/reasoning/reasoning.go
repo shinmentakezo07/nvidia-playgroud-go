@@ -27,9 +27,8 @@ const (
 )
 
 type profile struct {
-	kind         kind
-	levels       []string
-	defaultLevel string
+	kind   kind
+	levels []string
 }
 
 // profiles is keyed by registry model ids. Models removed from the anonymous
@@ -37,15 +36,15 @@ type profile struct {
 // together with their profiles; refresh this map when the catalog changes
 // (TestProfilesReferenceRegisteredModels enforces it).
 var profiles = map[string]profile{
-	"deepseek-ai/deepseek-v4-flash-0731": {kind: kindEffort, levels: []string{"none", "high", "max"}, defaultLevel: "high"},
-	"deepseek-ai/deepseek-v4-pro-0813":   {kind: kindEffort, levels: []string{"none", "high", "max"}, defaultLevel: "high"},
-	"nvidia/nemotron-3-ultra-550b-a55b":  {kind: kindEffort, levels: []string{"none", "medium", "high"}, defaultLevel: "high"},
+	"deepseek-ai/deepseek-v4-flash-0731": {kind: kindEffort, levels: []string{"none", "high", "max"}},
+	"deepseek-ai/deepseek-v4-pro-0813":   {kind: kindEffort, levels: []string{"none", "high", "max"}},
+	"nvidia/nemotron-3-ultra-550b-a55b":  {kind: kindEffort, levels: []string{"none", "medium", "high"}},
 	"google/diffusiongemma-26b-a4b-it":   {kind: kindToggle},
 	"minimaxai/minimax-m3":               {kind: kindMiniMax},
 	// kimi-k3_1-pro takes reasoning_effort at the request root; its public
 	// spec exposes low/medium/high/max with default low, and the playground
 	// sends it top-level (verified from a browser capture, 2026-11-05).
-	"moonshotai/kimi-k3_1-pro": {kind: kindTopLevelEffort, levels: []string{"low", "medium", "high", "max"}, defaultLevel: "low"},
+	"moonshotai/kimi-k3_1-pro": {kind: kindTopLevelEffort, levels: []string{"low", "medium", "high", "max"}},
 }
 
 var effortRanks = map[string]int{
@@ -126,8 +125,8 @@ func ValidateEffort(level string) error {
 
 // TopLevelEffort reports whether model takes reasoning_effort at the request
 // root and returns the value to send. level is an explicit requested effort
-// (may be empty); otherwise enable picks the model default or the lowest
-// supported level when reasoning cannot be turned off.
+// (may be empty); otherwise enable picks low (rounded up if unsupported), or
+// the lowest supported level when reasoning cannot be turned off.
 func TopLevelEffort(model, level string, enable bool) (string, bool) {
 	p, ok := profileFor(model)
 	if !ok || p.kind != kindTopLevelEffort {
@@ -205,6 +204,14 @@ func NormalizeThinking(raw map[string]any) ([]string, error) {
 		}
 		delete(raw, key)
 	}
+	if !supported {
+		for _, key := range []string{"enable_thinking", "clear_thinking", "reasoning_effort"} {
+			if _, ok := kw[key]; ok {
+				dropped = append(dropped, "chat_template_kwargs."+key)
+				delete(kw, key)
+			}
+		}
+	}
 
 	if supported {
 		switch p.kind {
@@ -221,10 +228,10 @@ func NormalizeThinking(raw map[string]any) ([]string, error) {
 			}
 		case kindToggle:
 			delete(kw, "reasoning_effort")
-			if hasEnabled {
-				kw["enable_thinking"] = enabled
-			} else if hasEffort {
+			if hasEffort {
 				kw["enable_thinking"] = effortEnablesThinking(effort)
+			} else if hasEnabled {
+				kw["enable_thinking"] = enabled
 			}
 		case kindEffortAndToggle:
 			if hasEnabled {
@@ -282,8 +289,8 @@ func NormalizeThinking(raw map[string]any) ([]string, error) {
 	return dropped, nil
 }
 
-// validateRequested rejects unknown effort and conflicting controls.
-// It checks all supplied aliases, including those losing precedence.
+// validateRequested rejects unknown values in every supplied alias. Conflict
+// checks consider only the winning effort and its same-source switch.
 func validateRequested(raw, kw map[string]any) error {
 	for _, field := range []struct {
 		value any
@@ -321,29 +328,37 @@ func validateRequested(raw, kw map[string]any) error {
 		if field.value == nil {
 			continue
 		}
-		enabled, ok := field.value.(bool)
-		if !ok {
+		if _, ok := field.value.(bool); !ok {
 			return fmt.Errorf("%s must be a boolean", field.name)
 		}
-		if !enabled && hasEnabledEffort(raw, kw) {
-			return fmt.Errorf("disabled thinking conflicts with explicit reasoning_effort")
-		}
 	}
-	if typ, ok := thinking["type"].(string); ok && isDisabledThinkingType(typ) && hasEnabledEffort(raw, kw) {
+	effort, hasEffort := requestedEffort(raw, kw)
+	if hasEffort && effortEnablesThinking(effort) && !requestedEffortEnabled(raw, kw) {
 		return fmt.Errorf("disabled thinking conflicts with explicit reasoning_effort")
 	}
 	return nil
 }
 
-func hasEnabledEffort(raw, kw map[string]any) bool {
+// requestedEffortEnabled checks only the switch associated with the winning
+// effort. A losing alias cannot conflict with a higher-priority effort.
+func requestedEffortEnabled(raw, kw map[string]any) bool {
 	thinking, _ := raw["thinking"].(map[string]any)
-	for _, value := range []any{raw["reasoning_effort"], kw["reasoning_effort"], thinking["reasoning_effort"]} {
-		if effort, ok := value.(string); ok {
-			normalized, valid := normalizeEffort(effort)
-			return valid && effortEnablesThinking(normalized)
+	if _, ok := kw["reasoning_effort"]; ok {
+		if enabled, ok := kw["enable_thinking"].(bool); ok {
+			return enabled
 		}
+		return true
 	}
-	return false
+	if _, ok := raw["reasoning_effort"]; ok {
+		return true
+	}
+	if _, ok := thinking["reasoning_effort"]; ok {
+		if value, ok := thinking["type"].(string); ok && isDisabledThinkingType(value) {
+			return false
+		}
+		return true
+	}
+	return true
 }
 
 func isDisabledThinkingType(typ string) bool {
@@ -369,16 +384,10 @@ func validateEffort(value any, name string) error {
 }
 
 func requestedEffort(raw, kw map[string]any) (string, bool) {
-	for _, value := range []any{kw["reasoning_effort"], raw["reasoning_effort"]} {
+	thinking, _ := raw["thinking"].(map[string]any)
+	for _, value := range []any{kw["reasoning_effort"], raw["reasoning_effort"], thinking["reasoning_effort"]} {
 		if effort, ok := value.(string); ok {
-			if normalized, ok := normalizeEffort(effort); ok {
-				return normalized, true
-			}
-		}
-	}
-	if thinking, ok := raw["thinking"].(map[string]any); ok {
-		if effort, ok := thinking["reasoning_effort"].(string); ok {
-			if normalized, ok := normalizeEffort(effort); ok {
+			if normalized, valid := normalizeEffort(effort); valid {
 				return normalized, true
 			}
 		}
@@ -387,17 +396,27 @@ func requestedEffort(raw, kw map[string]any) (string, bool) {
 }
 
 func requestedThinkingEnabled(raw, kw map[string]any) (bool, bool) {
+	thinking, _ := raw["thinking"].(map[string]any)
+	if _, ok := kw["reasoning_effort"]; ok {
+		return true, false
+	}
+	if _, ok := raw["reasoning_effort"]; ok {
+		return true, false
+	}
+	if _, ok := thinking["reasoning_effort"]; ok {
+		if enabled, ok := thinking["type"].(string); ok {
+			return !isDisabledThinkingType(enabled), true
+		}
+	}
 	if enabled, ok := kw["enable_thinking"].(bool); ok {
 		return enabled, true
 	}
-	if thinking, ok := raw["thinking"].(map[string]any); ok {
-		if typ, ok := thinking["type"].(string); ok {
-			switch strings.ToLower(strings.TrimSpace(typ)) {
-			case "enabled", "enable", "on", "auto", "adaptive":
-				return true, true
-			case "disabled", "disable", "off":
-				return false, true
-			}
+	if typ, ok := thinking["type"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(typ)) {
+		case "enabled", "enable", "on", "auto", "adaptive":
+			return true, true
+		case "disabled", "disable", "off":
+			return false, true
 		}
 	}
 	enabled, ok := raw["enable_thinking"].(bool)
@@ -444,13 +463,7 @@ func mapEnabled(enabled bool, p profile) (string, bool) {
 	if !enabled {
 		return mapEffort("none", p)
 	}
-	if len(p.levels) == 0 {
-		return "", false
-	}
-	if p.defaultLevel != "" {
-		return p.defaultLevel, true
-	}
-	return p.levels[len(p.levels)-1], true
+	return mapEffort("low", p)
 }
 
 func effortEnablesThinking(effort string) bool {

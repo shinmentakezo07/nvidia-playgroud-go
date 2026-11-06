@@ -108,6 +108,17 @@ go run ./cmd/streambench -auto -prompt "Count from 1 to 20."
 go run ./cmd/predict -model acme/new-llm -slug new-llm -function-id <uuid>
 ```
 
+## 推理级别
+
+Kimi 的推理级别放在顶层 `reasoning_effort`。启用思考但未指定级别时使用 `low`；显式传入 `low`、`high` 或 `max` 时保持该值，不自动改为其他级别。不支持某个级别的模型会使用最接近的可用级别。
+
+```bash
+go run ./cmd/predict -thinking on -reasoning-effort high -prompt "ping"
+go run ./cmd/predict -thinking on -reasoning-effort max -prompt "ping"
+```
+
+Go 客户端使用 `WithReasoningEffort("high")` 或 `WithReasoningEffort("max")`；`WithThinking(true)` 未指定级别时使用 `low`。显式级别优先于 `WithThinking`，固定 function-id 的模型也使用相同的级别映射。
+
 ## 配置
 
 常用 serve 参数：

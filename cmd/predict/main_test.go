@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -266,6 +268,48 @@ func TestSendOnceReusesHTTPConnections(t *testing.T) {
 	}
 	if got := connCount.Load(); got != 1 {
 		t.Fatalf("upstream connections = %d, want one reused keep-alive connection", got)
+	}
+}
+
+func TestSendOncePinnedKimiUsesLowDefaultAndExplicitLevels(t *testing.T) {
+	const pin = "4f1a2b3c-0000-4000-8000-000000000001"
+	for _, effort := range []string{"", "low", "high", "max"} {
+		name := effort
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				var raw map[string]any
+				payload, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(payload, &raw); err != nil {
+					t.Fatal(err)
+				}
+				want := effort
+				if want == "" {
+					want = "low"
+				}
+				if raw["reasoning_effort"] != want {
+					t.Errorf("reasoning_effort = %#v, want %s; body=%s", raw["reasoning_effort"], want, payload)
+				}
+				if req.Header.Get("nv-function-id") != pin {
+					t.Errorf("function id = %q, want pin", req.Header.Get("nv-function-id"))
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[]}`)), Header: http.Header{}}, nil
+			})}
+			defer closeIdleConnections(client)
+			cfg := &config{stream: false, thinking: "on", reasoningEffort: effort}
+			info, model, err := resolveTarget(&config{model: pin + "@" + models.DefaultModel})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sendOnce(t.Context(), cfg, info, model, "test-token", []nvidia.Message{{Role: "user", Content: "hi"}}, client); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

@@ -89,7 +89,9 @@ func TestTopLevelEffort(t *testing.T) {
 	}{
 		{"", true, "low"},
 		{"", false, "low"}, // kimi has no "none": lowest supported level
+		{"low", true, "low"},
 		{"medium", true, "medium"},
+		{"high", true, "high"},
 		{"max", true, "max"},
 		{"hgih", true, ""}, // invalid level cannot select a profile
 	}
@@ -210,39 +212,60 @@ func TestNormalizeThinkingSupportedModelDoesNotReport(t *testing.T) {
 	}
 }
 
-func TestNormalizeThinkingRejectsConflictsAcrossAliases(t *testing.T) {
-	valid := map[string]any{
-		"model": "moonshotai/kimi-k3_1-pro",
-		"chat_template_kwargs": map[string]any{
-			"enable_thinking": true,
-		},
-		"thinking": map[string]any{"type": "disabled"},
-	}
-	if _, err := NormalizeThinking(valid); err != nil {
-		t.Fatalf("valid precedence must not become a conflict: %v", err)
-	}
+func TestNormalizeThinkingRejectsEffectiveConflictsAcrossAliases(t *testing.T) {
 	for _, raw := range []map[string]any{
 		{
-			"model":           "moonshotai/kimi-k3_1-pro",
-			"enable_thinking": false,
-			"thinking":        map[string]any{"type": "enabled", "reasoning_effort": "high"},
-		},
-		{
-			"model":            "google/diffusiongemma-26b-a4b-it",
-			"thinking":         map[string]any{"type": "disabled"},
-			"reasoning_effort": "high",
-		},
-		{
-			"model":            "moonshotai/kimi-k3_1-pro",
-			"reasoning_effort": "high",
+			"model": "moonshotai/kimi-k3_1-pro",
 			"chat_template_kwargs": map[string]any{
-				"enable_thinking": false,
+				"enable_thinking":  false,
+				"reasoning_effort": "high",
+			},
+		},
+		{
+			"model": "moonshotai/kimi-k3_1-pro",
+			"thinking": map[string]any{
+				"type":             "disabled",
+				"reasoning_effort": "max",
 			},
 		},
 	} {
 		if _, err := NormalizeThinking(raw); err == nil || !strings.Contains(err.Error(), "conflicts") {
 			t.Errorf("raw = %#v: error = %v, want conflict", raw, err)
 		}
+	}
+}
+
+func TestNormalizeThinkingHonorsAliasPrecedence(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want string
+	}{
+		{
+			name: "top-level effort wins over nested disabled switch",
+			raw:  map[string]any{"model": "moonshotai/kimi-k3_1-pro", "reasoning_effort": "high", "thinking": map[string]any{"type": "disabled"}},
+			want: "high",
+		},
+		{
+			name: "top-level high beats same-source disable switch",
+			raw:  map[string]any{"model": "moonshotai/kimi-k3_1-pro", "reasoning_effort": "high", "enable_thinking": false},
+			want: "high",
+		},
+		{
+			name: "top-level none beats nested high",
+			raw:  map[string]any{"model": "moonshotai/kimi-k3_1-pro", "reasoning_effort": "none", "thinking": map[string]any{"type": "enabled", "reasoning_effort": "high"}},
+			want: "low",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NormalizeThinking(tc.raw); err != nil {
+				t.Fatal(err)
+			}
+			if got := tc.raw["reasoning_effort"]; got != tc.want {
+				t.Fatalf("reasoning_effort = %#v, want %s: %#v", got, tc.want, tc.raw)
+			}
+		})
 	}
 }
 
