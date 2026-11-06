@@ -998,6 +998,31 @@ func TestExecute_forwardsResponsesStoreWithoutRejecting(t *testing.T) {
 // sees it proves the per-request pin won over the registry value.
 const pinnedFunction = "4f1a2b3c-0000-4000-8000-000000000001"
 
+func TestPreparePayloadPreservesClientReasoningWithFunctionPin(t *testing.T) {
+	e := NewExecutor(Options{})
+	model := pinnedFunction + "@moonshotai/kimi-k3_1-pro"
+	body, _, err := e.preparePayload(clipexec.Request{
+		Model:   model,
+		Payload: []byte(`{"model":"` + model + `","reasoning_effort":"max","messages":[{"role":"user","content":"hi"}]}`),
+	}, clipexec.Options{SourceFormat: sdktranslator.FormatOpenAI}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := raw["model"]; got != "moonshotai/kimi-k3.1-pro" {
+		t.Errorf("model = %#v, want Kimi wire model", got)
+	}
+	if got := raw["reasoning_effort"]; got != "max" {
+		t.Fatalf("client reasoning_effort = %#v, want max: %s", got, body)
+	}
+	if _, ok := raw["chat_template_kwargs"]; ok {
+		t.Fatalf("Kimi must receive top-level effort, not kwargs: %s", body)
+	}
+}
+
 func TestPreparePayloadFunctionPin(t *testing.T) {
 	reg, err := models.Lookup("moonshotai/kimi-k3_1-pro")
 	if err != nil {

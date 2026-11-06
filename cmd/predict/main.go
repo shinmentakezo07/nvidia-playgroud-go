@@ -178,6 +178,11 @@ func run() error {
 			info.PredictEndpoint(), info.FunctionID, model, c.stream)
 	}
 
+	// Reuse a single transport across all -n requests. The client itself must
+	// be fresh because its captcha is one-shot, but DNS/TCP/TLS connections
+	// can and should survive those requests. No queue-status poll is needed.
+	httpClient := &http.Client{}
+	defer closeIdleConnections(httpClient)
 	for i := 1; i <= c.requests; i++ {
 		token, err := c.tokenFor(ctx, i)
 		if err != nil {
@@ -186,11 +191,20 @@ func run() error {
 		if c.requests > 1 {
 			fmt.Fprintf(os.Stderr, "--- request %d/%d ---\n", i, c.requests)
 		}
-		if err := sendOnce(ctx, c, info, model, token, msgs); err != nil {
+		if err := sendOnce(ctx, c, info, model, token, msgs, httpClient); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// closeIdleConnections releases keep-alive sockets at command shutdown.
+// It does not interrupt an active prediction stream.
+func closeIdleConnections(c *http.Client) {
+	type idleConnectionCloser interface{ CloseIdleConnections() }
+	if closer, ok := c.Transport.(idleConnectionCloser); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 // tokenFor returns the nv-captcha-token for request n: the pinned -captcha
@@ -357,12 +371,13 @@ func (c *config) requestBody(model string, msgs []nvidia.Message) ([]byte, error
 
 // sendOnce performs one predict call through the repo client, with the
 // invocation triple pinned via WithModelInfo so the registry is bypassed.
-func sendOnce(ctx context.Context, c *config, info models.ModelInfo, model, token string, msgs []nvidia.Message) error {
-	httpClient := &http.Client{Timeout: c.timeout}
+// The caller supplies a shared HTTP client to preserve keep-alive connections.
+func sendOnce(ctx context.Context, c *config, info models.ModelInfo, model, token string, msgs []nvidia.Message, httpClient *http.Client) error {
+	httpClient.Timeout = c.timeout
 	if c.stream {
 		// A whole-request client timeout also covers body reads and would cut
 		// a long reasoning stream; the ctx is uncapped for streams too.
-		httpClient = &http.Client{}
+		httpClient.Timeout = 0
 	}
 	opts := []nvidia.Option{
 		nvidia.WithCaptchaToken(token),

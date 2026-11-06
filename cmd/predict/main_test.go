@@ -2,11 +2,26 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	nvidia "nvidia-playgroud-go"
 	"nvidia-playgroud-go/internal/models"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 
 func TestResolveTarget(t *testing.T) {
 	tests := []struct {
@@ -195,6 +210,55 @@ func TestCurlCommand(t *testing.T) {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("curl output missing %q:\n%s", want, cmd)
 		}
+	}
+}
+
+// TestSendOnceSharesHTTPClient proves that recreating the API client for
+// one-shot captchas does not discard warm HTTP connections. Queue status is
+// irrelevant: every request must go directly to the predict endpoint.
+func TestSendOnceReusesHTTPConnections(t *testing.T) {
+	var connCount atomic.Int32
+	var pathsMu sync.Mutex
+	var paths []string
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/queues/") {
+			t.Errorf("prediction must not wait for queue-status polling: %s", r.URL)
+		}
+		pathsMu.Lock()
+		paths = append(paths, r.URL.Path)
+		pathsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	upstream.Config.ConnContext = func(ctx context.Context, _ net.Conn) context.Context {
+		connCount.Add(1)
+		return ctx
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = upstreamURL.Scheme
+		r.URL.Host = upstreamURL.Host
+		return upstream.Client().Transport.RoundTrip(r)
+	})}
+	defer closeIdleConnections(client)
+	info, model, err := resolveTarget(&config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config{stream: false, thinking: "auto", timeout: time.Second}
+	for i := 0; i < 2; i++ {
+		if err := sendOnce(t.Context(), cfg, info, model, "one-shot-token", []nvidia.Message{{Role: "user", Content: "hi"}}, client); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := connCount.Load(); got != 1 {
+		t.Fatalf("upstream connections = %d, want one reused keep-alive connection", got)
 	}
 }
 

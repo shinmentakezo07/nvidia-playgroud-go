@@ -106,6 +106,9 @@ func main() {
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		// One shared transport serves the executor and every background
+		// refresher. Reuse warm keep-alive connections for predictions and
+		// captcha/catalog requests instead of creating a transport per call.
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   64,
@@ -113,6 +116,8 @@ func main() {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		// Cover upstream queueing only, not the SSE body: long reasoning
+		// streams are bounded by the caller's context, not a total deadline.
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
 

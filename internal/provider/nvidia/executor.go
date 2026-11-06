@@ -205,21 +205,12 @@ func (e *Executor) preparePayload(req clipexec.Request, opts clipexec.Options, s
 		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
 	}
 
-	body, err := NormalizeRequestBody(payload)
-	if err != nil {
-		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
-	}
-
-	// Ensure stream flag matches the execution mode after translation.
-	body, err = forceStreamFlag(body, stream)
-	if err != nil {
-		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
-	}
-
+	// Resolve the model before normalizing reasoning: profiles are keyed by
+	// registry model ids, not function-pin or backend wire-model spellings.
 	var modelProbe struct {
 		Model string `json:"model"`
 	}
-	_ = json.Unmarshal(body, &modelProbe)
+	_ = json.Unmarshal(payload, &modelProbe)
 	lookupModel := modelProbe.Model
 	if lookupModel == "" {
 		lookupModel = model
@@ -231,14 +222,25 @@ func (e *Executor) preparePayload(req clipexec.Request, opts clipexec.Options, s
 		// malformed "<function-id>@" pin.
 		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, err.Error())
 	}
-	// A "<function-id>@<model>" pin is gateway routing syntax: the upstream
-	// body must carry the plain registry model id, spelled the way the
-	// backend expects (kimi uses a dot: moonshotai/kimi-k3.1-pro).
-	if wireModel := models.RequestModel(canonical); wireModel != modelProbe.Model {
-		body, err = setBodyModel(body, wireModel)
-		if err != nil {
-			return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
-		}
+	// A "<function-id>@<model>" pin is gateway routing syntax: normalize using
+	// its canonical model id, not the pin-bearing routing reference. The pin
+	// selects a function; it does not change the model's reasoning profile.
+	payload, err = setBodyModel(payload, canonical)
+	if err != nil {
+		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
+	}
+
+	body, err := NormalizeRequestBody(payload)
+	if err != nil {
+		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
+	}
+	body, err = forceStreamFlag(body, stream)
+	if err != nil {
+		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
+	}
+	body, err = setBodyModel(body, models.RequestModel(canonical))
+	if err != nil {
+		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
 	}
 	return body, info, nil
 }
