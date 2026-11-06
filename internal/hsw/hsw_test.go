@@ -63,6 +63,11 @@ func TestPatchWasmInstantiate(t *testing.T) {
 	if strings.Contains(out, "WebAssembly.instantiate") {
 		t.Errorf("promise instantiate still present: %s", out)
 	}
+	// The old trap patch rewrote `unreachable` to `nop` and now breaks wasm
+	// validation; make sure it cannot sneak back into the rewrite.
+	if strings.Contains(out, "__po") {
+		t.Errorf("obsolete wasm trap patch reintroduced: %s", out)
+	}
 }
 
 func TestPatchWasmInstantiateNewShape(t *testing.T) {
@@ -78,6 +83,11 @@ func TestPatchWasmInstantiateNewShape(t *testing.T) {
 	}
 	if strings.Contains(out, "WebAssembly.instantiate") {
 		t.Errorf("promise instantiate still present: %s", out)
+	}
+	// The old trap patch rewrote `unreachable` to `nop` and now breaks wasm
+	// validation; make sure it cannot sneak back into the rewrite.
+	if strings.Contains(out, "__po") {
+		t.Errorf("obsolete wasm trap patch reintroduced: %s", out)
 	}
 }
 
