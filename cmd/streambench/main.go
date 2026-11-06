@@ -60,7 +60,7 @@ func main() {
 	}
 
 	body, err := json.Marshal(map[string]any{
-		"model":       nvidia.DefaultModel,
+		"model":       models.RequestModel(nvidia.DefaultModel),
 		"messages":    []map[string]string{{"role": "user", "content": *prompt}},
 		"temperature": 0.2,
 		"top_p":       1.0,

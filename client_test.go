@@ -127,8 +127,8 @@ func TestBuildRequestUsesCaptchaAuthentication(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode request body: %v", err)
 	}
-	if got.Model != chatRequest.Model {
-		t.Errorf("body model = %q, want %q", got.Model, chatRequest.Model)
+	if got.Model != models.RequestModel(chatRequest.Model) {
+		t.Errorf("body model = %q, want %q", got.Model, models.RequestModel(chatRequest.Model))
 	}
 	if len(got.Messages) != 1 || got.Messages[0] != chatRequest.Messages[0] {
 		t.Errorf("body messages = %#v, want %#v", got.Messages, chatRequest.Messages)
@@ -147,7 +147,9 @@ func TestApplyDefaultsSkipsThinkingForUnverifiedModel(t *testing.T) {
 }
 
 func TestApplyDefaultsEnablesThinkingWhenExplicit(t *testing.T) {
-	client := New(WithCaptchaToken("t"), WithThinking(true))
+	// Use a toggle model: kimi takes reasoning_effort at the request root and
+	// is covered by TestApplyDefaultsKimiUsesTopLevelEffort.
+	client := New(WithCaptchaToken("t"), WithModel("google/diffusiongemma-26b-a4b-it"), WithThinking(true))
 	req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
 	client.applyDefaults(req)
 	if req.ChatTemplateKwargs["enable_thinking"] != true {
@@ -180,7 +182,7 @@ func TestApplyDefaultsPreservesCallerKwargs(t *testing.T) {
 }
 
 func TestApplyDefaultsFillsEmptyKwargsWhenExplicit(t *testing.T) {
-	client := New(WithCaptchaToken("t"), WithThinking(true))
+	client := New(WithCaptchaToken("t"), WithModel("google/diffusiongemma-26b-a4b-it"), WithThinking(true))
 	req := &ChatRequest{
 		Messages:           []Message{{Role: RoleUser, Content: "Hi"}},
 		ChatTemplateKwargs: map[string]any{},
@@ -188,6 +190,96 @@ func TestApplyDefaultsFillsEmptyKwargsWhenExplicit(t *testing.T) {
 	client.applyDefaults(req)
 	if req.ChatTemplateKwargs["enable_thinking"] != true {
 		t.Fatalf("empty kwargs should get defaults, got %#v", req.ChatTemplateKwargs)
+	}
+}
+
+func TestApplyDefaultsMapsThinkingPerModel(t *testing.T) {
+	// WithThinking must use the knob each model accepts. Sending
+	// enable_thinking to deepseek/nemotron is rejected or ignored upstream.
+	cases := []struct {
+		model  string
+		enable bool
+		key    string
+		want   any
+	}{
+		{"deepseek-ai/deepseek-v4-pro-0813", true, "reasoning_effort", "high"},
+		{"deepseek-ai/deepseek-v4-pro-0813", false, "reasoning_effort", "none"},
+		{"nvidia/nemotron-3-ultra-550b-a55b", true, "reasoning_effort", "high"},
+		{"minimaxai/minimax-m3", true, "thinking_mode", "enabled"},
+		{"minimaxai/minimax-m3", false, "thinking_mode", "disabled"},
+		{"google/diffusiongemma-26b-a4b-it", true, "enable_thinking", true},
+		{"google/diffusiongemma-26b-a4b-it", false, "enable_thinking", false},
+	}
+	for _, tc := range cases {
+		client := New(WithCaptchaToken("t"), WithModel(tc.model), WithThinking(tc.enable))
+		req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
+		client.applyDefaults(req)
+		if got := req.ChatTemplateKwargs[tc.key]; got != tc.want {
+			t.Errorf("%s enable=%v: %s = %#v, want %#v (kwargs %#v)",
+				tc.model, tc.enable, tc.key, got, tc.want, req.ChatTemplateKwargs)
+		}
+		for k := range req.ChatTemplateKwargs {
+			if k != tc.key && k != "clear_thinking" {
+				t.Errorf("%s enable=%v: unexpected kwarg %q in %#v", tc.model, tc.enable, k, req.ChatTemplateKwargs)
+			}
+		}
+	}
+}
+
+func TestApplyDefaultsKimiUsesTopLevelEffort(t *testing.T) {
+	cases := []struct {
+		name string
+		opts []Option
+		want string
+	}{
+		{"thinking on", []Option{WithThinking(true)}, "low"},
+		{"thinking off", []Option{WithThinking(false)}, "low"}, // no "none" level
+		{"explicit max", []Option{WithReasoningEffort("max")}, "max"},
+		{"explicit beats thinking", []Option{WithThinking(true), WithReasoningEffort("medium")}, "medium"},
+	}
+	for _, tc := range cases {
+		opts := append([]Option{WithCaptchaToken("t"), WithModel("moonshotai/kimi-k3_1-pro")}, tc.opts...)
+		client := New(opts...)
+		req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
+		client.applyDefaults(req)
+		if req.ReasoningEffort != tc.want {
+			t.Errorf("%s: ReasoningEffort = %q, want %q", tc.name, req.ReasoningEffort, tc.want)
+		}
+		if len(req.ChatTemplateKwargs) != 0 {
+			t.Errorf("%s: kimi must not receive kwargs, got %#v", tc.name, req.ChatTemplateKwargs)
+		}
+	}
+}
+
+func TestBuildRequestKimiWireModel(t *testing.T) {
+	client := New(WithCaptchaToken("t"), WithModel("moonshotai/kimi-k3_1-pro"))
+	req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
+	client.applyDefaults(req)
+	httpReq, err := client.buildRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var got ChatRequest
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got.Model != "moonshotai/kimi-k3.1-pro" {
+		t.Errorf("body model = %q, want the dot form", got.Model)
+	}
+	if req.Model != "moonshotai/kimi-k3_1-pro" {
+		t.Errorf("caller request model = %q, want the registry id", req.Model)
+	}
+}
+
+func TestNewHasNoOverallTimeout(t *testing.T) {
+	// http.Client.Timeout also bounds response-body reads, so a default
+	// timeout would truncate long SSE streams (long reasoning phases).
+	if got := New().httpClient.Timeout; got != 0 {
+		t.Fatalf("default client timeout = %v, want 0 (streams must not be capped)", got)
 	}
 }
 
@@ -270,8 +362,8 @@ func TestBuildRequestAppliesFunctionPin(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if got.Model != DefaultModel {
-		t.Errorf("body model = %q, want %q without the pin", got.Model, DefaultModel)
+	if got.Model != models.RequestModel(DefaultModel) {
+		t.Errorf("body model = %q, want %q without the pin", got.Model, models.RequestModel(DefaultModel))
 	}
 	if req.Model != DefaultModel {
 		t.Errorf("caller request model = %q, want %q", req.Model, DefaultModel)

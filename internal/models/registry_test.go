@@ -61,6 +61,15 @@ func TestPredictEndpoint(t *testing.T) {
 	}
 }
 
+func TestRequestModel(t *testing.T) {
+	if got := RequestModel("moonshotai/kimi-k3_1-pro"); got != "moonshotai/kimi-k3.1-pro" {
+		t.Fatalf("kimi body model = %q, want the dot form", got)
+	}
+	if got := RequestModel("deepseek-ai/deepseek-v4-pro-0813"); got != "deepseek-ai/deepseek-v4-pro-0813" {
+		t.Fatalf("unmapped model = %q, want identity", got)
+	}
+}
+
 // Registry invariants: every entry has a UUID-shaped function id and the
 // shared namespace. Function ids are *usually* unique per model, but NVIDIA
 // does alias some backend versions to the same NVCF function (e.g. the

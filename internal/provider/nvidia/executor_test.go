@@ -1021,34 +1021,34 @@ func TestPreparePayloadFunctionPin(t *testing.T) {
 			name:         "no pin uses the registry value",
 			model:        "moonshotai/kimi-k3_1-pro",
 			wantFunction: reg.FunctionID,
-			wantBody:     "moonshotai/kimi-k3_1-pro",
+			wantBody:     "moonshotai/kimi-k3.1-pro",
 		},
 		{
 			name:         "body pin overrides the function id",
 			model:        pinnedFunction + "@moonshotai/kimi-k3_1-pro",
 			wantFunction: pinnedFunction,
-			wantBody:     "moonshotai/kimi-k3_1-pro",
+			wantBody:     "moonshotai/kimi-k3.1-pro",
 		},
 		{
 			name:         "header pin overrides the function id",
 			model:        "moonshotai/kimi-k3_1-pro",
 			headerPin:    pinnedFunction,
 			wantFunction: pinnedFunction,
-			wantBody:     "moonshotai/kimi-k3_1-pro",
+			wantBody:     "moonshotai/kimi-k3.1-pro",
 		},
 		{
 			name:         "body pin wins over header pin",
 			model:        pinnedFunction + "@moonshotai/kimi-k3_1-pro",
 			headerPin:    "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 			wantFunction: pinnedFunction,
-			wantBody:     "moonshotai/kimi-k3_1-pro",
+			wantBody:     "moonshotai/kimi-k3.1-pro",
 		},
 		{
 			name:         "blank header pin is ignored",
 			model:        "moonshotai/kimi-k3_1-pro",
 			headerPin:    "   ",
 			wantFunction: reg.FunctionID,
-			wantBody:     "moonshotai/kimi-k3_1-pro",
+			wantBody:     "moonshotai/kimi-k3.1-pro",
 		},
 		{
 			name:         "invalid header pin is a client error",
@@ -1203,7 +1203,7 @@ func TestExecuteStreamSendsPinnedFunctionID(t *testing.T) {
 	if gotFunction != pinnedFunction {
 		t.Fatalf("upstream nv-function-id = %q, want %q", gotFunction, pinnedFunction)
 	}
-	if gotBodyModel != "moonshotai/kimi-k3_1-pro" {
-		t.Fatalf("upstream body model = %q, want the unpinned model id", gotBodyModel)
+	if gotBodyModel != "moonshotai/kimi-k3.1-pro" {
+		t.Fatalf("upstream body model = %q, want the unpinned wire model id", gotBodyModel)
 	}
 }

@@ -3,8 +3,6 @@ package nvidia
 import (
 	"encoding/json"
 	"testing"
-
-	"nvidia-playgroud-go/internal/models"
 )
 
 func TestNormalizeRequestBody(t *testing.T) {
@@ -209,10 +207,61 @@ func TestNormalizeRequestBodyDoesNotInjectThinkingIntoUnsupportedModel(t *testin
 	}
 }
 
-func TestReasoningProfilesReferenceRegisteredModels(t *testing.T) {
-	for model := range reasoningProfiles {
-		if _, err := models.Lookup(model); err != nil {
-			t.Errorf("reasoning profile references unsupported model %q: %v", model, err)
+func TestNormalizeRequestBodyKimiTopLevelEffort(t *testing.T) {
+	out, err := NormalizeRequestBody([]byte(`{"model":"moonshotai/kimi-k3_1-pro","reasoning_effort":"high","stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["reasoning_effort"] != "high" {
+		t.Fatalf("reasoning_effort = %#v, want top-level high: %s", raw["reasoning_effort"], out)
+	}
+	if _, ok := raw["chat_template_kwargs"]; ok {
+		t.Fatalf("kimi must not receive chat_template_kwargs: %s", out)
+	}
+}
+
+func TestNormalizeRequestBodyKimiThinkingAlias(t *testing.T) {
+	out, err := NormalizeRequestBody([]byte(`{"model":"moonshotai/kimi-k3_1-pro","thinking":{"type":"enabled"},"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["reasoning_effort"] != "low" {
+		t.Fatalf("reasoning_effort = %#v, want the model default low: %s", raw["reasoning_effort"], out)
+	}
+	if _, ok := raw["thinking"]; ok {
+		t.Fatalf("thinking alias leaked: %s", out)
+	}
+}
+
+func TestNormalizeThinkingIgnoresUnknownEffort(t *testing.T) {
+	// A typo must not round to the model default: for an effort model it
+	// would silently raise thinking, for a toggle model it would turn it on.
+	cases := []string{
+		`{"model":"deepseek-ai/deepseek-v4-pro-0813","reasoning_effort":"hgih","stream":false}`,
+		`{"model":"google/diffusiongemma-26b-a4b-it","reasoning_effort":"hgih","stream":false}`,
+	}
+	for _, in := range cases {
+		out, err := NormalizeRequestBody([]byte(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(out, &raw); err != nil {
+			t.Fatal(err)
+		}
+		if kw, ok := raw["chat_template_kwargs"].(map[string]any); ok && len(kw) != 0 {
+			t.Fatalf("in=%s unknown effort produced kwargs %#v", in, kw)
+		}
+		if _, ok := raw["reasoning_effort"]; ok {
+			t.Fatalf("in=%s reasoning_effort alias leaked upstream", in)
 		}
 	}
 }

@@ -171,7 +171,7 @@ func buildPrefix(approxTokens int) string {
 
 func buildBody(model, system, user string, stream bool, maxTokens int, thinking bool) ([]byte, error) {
 	req := map[string]any{
-		"model":       model,
+		"model":       models.RequestModel(model),
 		"messages":    []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": user}},
 		"temperature": 0,
 		"top_p":       1,

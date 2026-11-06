@@ -232,9 +232,10 @@ func (e *Executor) preparePayload(req clipexec.Request, opts clipexec.Options, s
 		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, err.Error())
 	}
 	// A "<function-id>@<model>" pin is gateway routing syntax: the upstream
-	// body must carry the plain registry model id.
-	if canonical != modelProbe.Model {
-		body, err = setBodyModel(body, canonical)
+	// body must carry the plain registry model id, spelled the way the
+	// backend expects (kimi uses a dot: moonshotai/kimi-k3.1-pro).
+	if wireModel := models.RequestModel(canonical); wireModel != modelProbe.Model {
+		body, err = setBodyModel(body, wireModel)
 		if err != nil {
 			return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
 		}

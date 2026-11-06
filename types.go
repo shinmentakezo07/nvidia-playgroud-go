@@ -53,6 +53,12 @@ type ChatRequest struct {
 	Seed        int       `json:"seed,omitempty"`
 	Stream      bool      `json:"stream,omitempty"`
 
+	// ReasoningEffort is the model-native effort level for models that take
+	// it at the request root (kimi-k3_1-pro: low/medium/high/max). It is set
+	// from WithReasoningEffort / WithThinking; other models receive the knob
+	// inside ChatTemplateKwargs instead.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+
 	// Extra body for NVIDIA-specific features (thinking, etc.).
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 	StreamOptions      *StreamOptions `json:"stream_options,omitempty"`

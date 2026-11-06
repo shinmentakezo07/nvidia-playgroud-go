@@ -54,6 +54,7 @@ import (
 	"nvidia-playgroud-go/internal/hcaptcha"
 	"nvidia-playgroud-go/internal/hcaptchapow"
 	"nvidia-playgroud-go/internal/models"
+	"nvidia-playgroud-go/internal/reasoning"
 )
 
 func main() {
@@ -88,6 +89,9 @@ type config struct {
 	temp      float64
 	topP      float64
 	thinking  string
+	// reasoningEffort is an explicit level (low/medium/high/max or none); it
+	// overrides -thinking and is mapped to the model's knob.
+	reasoningEffort string
 
 	// run control
 	requests int
@@ -119,9 +123,10 @@ func run() error {
 	fs.Float64Var(&c.temp, "temperature", 1.0, "temperature")
 	fs.Float64Var(&c.topP, "top-p", 0, "top_p (0 = omit; some models 400 on it)")
 	fs.StringVar(&c.thinking, "thinking", "auto", "reasoning kwargs: auto|on|off (auto = only for models that declare support)")
+	fs.StringVar(&c.reasoningEffort, "reasoning-effort", "", "explicit reasoning level (low|medium|high|max or none); overrides -thinking")
 
 	fs.IntVar(&c.requests, "n", 1, "number of requests; each mints its own one-shot token")
-	fs.DurationVar(&c.timeout, "timeout", 180*time.Second, "total timeout for solving plus requests")
+	fs.DurationVar(&c.timeout, "timeout", 180*time.Second, "timeout for non-streaming requests (0 = no limit; streams are never capped)")
 	fs.BoolVar(&c.list, "list", false, "print the model registry (namespace/slug/function-id) and exit")
 	fs.BoolVar(&c.curl, "curl", false, "print the equivalent curl command and exit without sending")
 	fs.BoolVar(&c.verbose, "v", false, "log the resolved target, per-stage PoW timing, and request headers")
@@ -145,8 +150,15 @@ func run() error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	ctx, cancelTimeout := context.WithTimeout(ctx, c.timeout)
-	defer cancelTimeout()
+	// -timeout bounds non-streaming calls. A streaming response must not carry
+	// a whole-request deadline: http.Client.Timeout and ctx deadlines also cap
+	// body reads, which truncates long reasoning phases mid-stream. Stop a
+	// stream with Ctrl-C instead.
+	if !c.stream && c.timeout > 0 {
+		var cancelTimeout context.CancelFunc
+		ctx, cancelTimeout = context.WithTimeout(ctx, c.timeout)
+		defer cancelTimeout()
+	}
 
 	if c.curl {
 		token, err := c.tokenFor(ctx, 1)
@@ -312,7 +324,7 @@ func readArg(s string) ([]byte, error) {
 // requestBody mirrors what the client sends, for -curl output only.
 func (c *config) requestBody(model string, msgs []nvidia.Message) ([]byte, error) {
 	req := nvidia.ChatRequest{
-		Model:       model,
+		Model:       models.RequestModel(model),
 		Messages:    msgs,
 		Temperature: c.temp,
 		TopP:        c.topP,
@@ -320,8 +332,22 @@ func (c *config) requestBody(model string, msgs []nvidia.Message) ([]byte, error
 		Seed:        c.seed,
 		Stream:      c.stream,
 	}
-	if c.thinking == "on" {
-		req.ChatTemplateKwargs = map[string]any{"enable_thinking": true, "clear_thinking": false}
+	if c.reasoningEffort != "" {
+		if effort, ok := reasoning.TopLevelEffort(model, c.reasoningEffort, true); ok {
+			req.ReasoningEffort = effort
+		} else if kw, ok := reasoning.EffortKwargs(model, c.reasoningEffort); ok {
+			req.ChatTemplateKwargs = kw
+		}
+	} else {
+		switch c.thinking {
+		case "on", "off":
+			enable := c.thinking == "on"
+			if effort, ok := reasoning.TopLevelEffort(model, "", enable); ok {
+				req.ReasoningEffort = effort
+			} else {
+				req.ChatTemplateKwargs = reasoning.ThinkingKwargs(model, enable)
+			}
+		}
 	}
 	if c.stream {
 		req.StreamOptions = &nvidia.StreamOptions{IncludeUsage: true}
@@ -332,12 +358,18 @@ func (c *config) requestBody(model string, msgs []nvidia.Message) ([]byte, error
 // sendOnce performs one predict call through the repo client, with the
 // invocation triple pinned via WithModelInfo so the registry is bypassed.
 func sendOnce(ctx context.Context, c *config, info models.ModelInfo, model, token string, msgs []nvidia.Message) error {
+	httpClient := &http.Client{Timeout: c.timeout}
+	if c.stream {
+		// A whole-request client timeout also covers body reads and would cut
+		// a long reasoning stream; the ctx is uncapped for streams too.
+		httpClient = &http.Client{}
+	}
 	opts := []nvidia.Option{
 		nvidia.WithCaptchaToken(token),
 		nvidia.WithModelInfo(info),
 		nvidia.WithModel(model),
 		nvidia.WithDefaults(c.maxTokens, c.seed, c.temp, c.topP),
-		nvidia.WithHTTPClient(&http.Client{Timeout: c.timeout}),
+		nvidia.WithHTTPClient(httpClient),
 	}
 	switch c.thinking {
 	case "on":
@@ -347,6 +379,9 @@ func sendOnce(ctx context.Context, c *config, info models.ModelInfo, model, toke
 	case "auto":
 	default:
 		return fmt.Errorf("-thinking must be auto|on|off, got %q", c.thinking)
+	}
+	if c.reasoningEffort != "" {
+		opts = append(opts, nvidia.WithReasoningEffort(c.reasoningEffort))
 	}
 	client := nvidia.New(opts...)
 

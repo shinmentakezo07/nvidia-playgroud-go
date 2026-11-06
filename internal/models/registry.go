@@ -7,6 +7,10 @@
 //	              nv-function-id: {functionID}
 //	              nv-captcha-token: <hCaptcha token>
 //
+// kimi-k3_1-pro keeps the shared stateless route; only its request body
+// carries the dot-form model id "moonshotai/kimi-k3.1-pro" (captured
+// 2026-11-05), while the registry key uses an underscore.
+//
 // The stateless route is shared by every model: the request path no longer
 // carries {namespace}/{slug} — routing is done entirely by the per-model
 // nv-function-id header. The gateway does not validate the function id
@@ -81,6 +85,23 @@ type ModelCapability struct {
 // 404s for delisted models.
 func (m ModelInfo) PredictEndpoint() string {
 	return PredictBase + "/v3/predict/stateless/v1/chat/completions"
+}
+
+// requestModelOverrides maps registry ids to the model string the backend
+// expects in the request body when it differs from the registry key.
+var requestModelOverrides = map[string]string{
+	"moonshotai/kimi-k3_1-pro": "moonshotai/kimi-k3.1-pro",
+}
+
+// RequestModel returns the model string to put in the request body for a
+// registry model id. It is the registry id unless the backend expects a
+// different spelling (kimi uses a dot where the registry id uses an
+// underscore).
+func RequestModel(model string) string {
+	if wire, ok := requestModelOverrides[model]; ok {
+		return wire
+	}
+	return model
 }
 
 // DefaultModel is the project's default playground model.

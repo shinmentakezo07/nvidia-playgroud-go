@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"nvidia-playgroud-go/internal/models"
+	"nvidia-playgroud-go/internal/reasoning"
 )
 
 // --- Client ---
@@ -29,8 +30,13 @@ type Client struct {
 	temp      float64
 	topP      float64
 
-	// thinking mirrors Playground: chat_template_kwargs.enable_thinking
+	// thinking is the explicit on/off request; the actual wire knob is
+	// model-specific (see WithThinking).
 	thinking *bool
+
+	// reasoningEffort is an explicit level (low/medium/high/max, or none).
+	// It takes precedence over thinking and is mapped to the model's knob.
+	reasoningEffort string
 
 	// infoOverride bypasses registry lookup in buildRequest (custom
 	// namespace/slug/function-id targets). Nil means use the registry.
@@ -59,7 +65,7 @@ func WithModel(m string) Option {
 // WithModelInfo pins the NVCF invocation target (namespace, slug,
 // function id) directly, bypassing the model registry. Use it to call a
 // predict endpoint the registry does not know yet. The request body's
-// model field still comes from WithModel / req.Model.
+// model field is the canonical model id, mapped to the wire spelling.
 func WithModelInfo(info models.ModelInfo) Option {
 	return func(c *Client) { c.infoOverride = &info }
 }
@@ -74,19 +80,32 @@ func WithDefaults(maxTokens int, seed int, temp, topP float64) Option {
 	}
 }
 
-// WithThinking forces thinking mode (reasoning_content) on or off. Without
-// it, chat_template_kwargs.enable_thinking is injected only for models that
-// declare the Thinking capability (most of the current anonymous catalog
-// rejects thinking kwargs with 400).
+// WithThinking forces thinking mode (reasoning_content) on or off. The knob
+// is model-specific: reasoning_effort for deepseek/nemotron, enable_thinking
+// for toggle models, thinking_mode for minimax. Without it, thinking kwargs
+// are injected only for models that declare the Thinking capability (most of
+// the current anonymous catalog rejects thinking kwargs with 400).
 func WithThinking(enable bool) Option {
 	return func(c *Client) { c.thinking = &enable }
+}
+
+// WithReasoningEffort requests an explicit reasoning level (low, medium,
+// high, max, or none where the model supports it). It takes precedence over
+// WithThinking and is mapped to the knob the model accepts: a top-level
+// reasoning_effort for kimi, chat_template_kwargs for the other models.
+func WithReasoningEffort(level string) Option {
+	return func(c *Client) { c.reasoningEffort = level }
 }
 
 // New creates a client configured with an hCaptcha token (default model
 // moonshotai/kimi-k3_1-pro; override with WithModel).
 func New(opts ...Option) *Client {
 	c := &Client{
-		httpClient: &http.Client{Timeout: requestTimeout},
+		// No overall timeout: http.Client.Timeout also covers reading the
+		// response body, which would truncate a long SSE stream (a model that
+		// reasons for minutes). Non-streaming calls get requestTimeout from
+		// doRequest; streams are bounded by the caller's context only.
+		httpClient: &http.Client{},
 		model:      DefaultModel,
 		maxTokens:  defaultMaxTokens,
 		seed:       defaultSeed,
@@ -115,8 +134,12 @@ func (c *Client) buildRequest(ctx context.Context, req *ChatRequest) (*http.Requ
 	if req.Model == model && model != canonical {
 		req.Model = canonical
 	}
-
-	body, err := json.Marshal(req)
+	// The wire model string can differ from the registry key: kimi's backend
+	// expects "moonshotai/kimi-k3.1-pro" while the registry id uses an
+	// underscore. Marshal a copy so the caller's request keeps the registry id.
+	bodyReq := *req
+	bodyReq.Model = models.RequestModel(canonical)
+	body, err := json.Marshal(&bodyReq)
 	if err != nil {
 		return nil, fmt.Errorf("nvidia: marshal request: %w", err)
 	}
@@ -155,21 +178,38 @@ func (c *Client) applyDefaults(r *ChatRequest) {
 		enable := true
 		if c.thinking != nil {
 			enable = *c.thinking
-		} else {
-			// Only inject thinking kwargs for models known to accept them
-			// (Capability.Thinking). Most of the current anonymous catalog
-			// (e.g. kimi-k3_1-pro) rejects chat_template_kwargs with 400.
-			info, _, err := c.modelInfo(r.Model)
-			if err != nil || info.Capability == nil || !info.Capability.Thinking {
+		}
+		level := c.reasoningEffort
+		if level == "" {
+			level = r.ReasoningEffort
+		}
+		if c.thinking != nil || level != "" {
+			// Explicit control: use the knob this model actually accepts.
+			// kimi-k3_1-pro takes reasoning_effort at the request root.
+			if effort, ok := reasoning.TopLevelEffort(r.Model, level, enable); ok {
+				r.ReasoningEffort = effort
+				return
+			}
+			if level != "" {
+				if kw, ok := reasoning.EffortKwargs(r.Model, level); ok {
+					r.ChatTemplateKwargs = kw
+					r.ReasoningEffort = "" // consumed into the kwargs
+					return
+				}
+			}
+			if c.thinking != nil {
+				r.ChatTemplateKwargs = reasoning.ThinkingKwargs(r.Model, enable)
 				return
 			}
 		}
-		if enable {
-			r.ChatTemplateKwargs = map[string]any{
-				"enable_thinking": true,
-				"clear_thinking":  false,
-			}
+		// Only inject thinking kwargs for models known to accept them
+		// (Capability.Thinking). Most of the current anonymous catalog
+		// (e.g. kimi-k3_1-pro) rejects chat_template_kwargs with 400.
+		info, _, err := c.modelInfo(r.Model)
+		if err != nil || info.Capability == nil || !info.Capability.Thinking {
+			return
 		}
+		r.ChatTemplateKwargs = reasoning.ThinkingKwargs(r.Model, true)
 	}
 }
 
@@ -227,6 +267,12 @@ type StreamChunk struct {
 
 // StreamChat sends a streaming chat completion. Each chunk is delivered to the callback.
 // The callback's return value controls whether streaming continues (true = continue).
+//
+// The client has no overall timeout, so long reasoning phases are not cut
+// off; the stream ends when ctx is cancelled, the server closes it, or
+// [DONE] arrives. A caller-supplied http.Client with a Timeout still applies
+// to the whole stream (including body reads), so leave it at zero for
+// streaming.
 func (c *Client) StreamChat(ctx context.Context, messages []Message, cb func(StreamChunk)) error {
 	req := &ChatRequest{
 		Messages: messages,
@@ -244,6 +290,15 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, cb func(Str
 // --- Internal: doRequest (non-streaming) ---
 
 func (c *Client) doRequest(ctx context.Context, req *ChatRequest, target interface{}) error {
+	// Non-streaming requests keep the historical 120s budget. Streaming does
+	// not: a whole-request deadline would cut long reasoning phases even
+	// while tokens are still flowing (see doStream).
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
+		defer cancel()
+	}
+
 	httpReq, err := c.buildRequest(ctx, req)
 	if err != nil {
 		return err
