@@ -12,8 +12,6 @@ NVIDIA Build Playground 的 Go 客户端和本地代理。支持多模型路由�
 go run ./cmd/serve -auto -addr :8080
 ```
 
-pl
-
 调用 OpenAI Chat Completions：
 
 ```bash
@@ -76,7 +74,7 @@ MODEL_LIVE=1 go test ./internal/models -run TestLiveFetchSmoke -v
 - token 来源优先级：请求头 `nv-captcha-token`、`-captcha` 一次性参数、`-auto` token 池。
 - 池为空时，请求最多等待 `-captcha-wait`（默认 30 秒），随后返回 503。
 - 上游返回 captcha 相关错误时，代理会更换 token 重试，最多尝试 3 次。
-- 无请求 3 分钟后停止后台求解，下次请求到达时重新启动；`-pool-idle=0` 可关闭此行为。
+- 池默认常驻（`-pool-idle=0`）：空闲时不停止求解，请求不会因冷启动重新求解而变慢。设置正数（如 `-pool-idle=3m`）可在空闲期间零求解开销，代价是空闲后的第一个请求要等待重新求 token。
 
 单独获取 token：
 

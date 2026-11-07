@@ -69,7 +69,7 @@ func main() {
 	inflightWait := flag.Duration("inflight-wait", 30*time.Second, "how long to wait for an in-flight slot before returning 503 (0=reject immediately)")
 	coalesceMs := flag.Int("coalesce-ms", 16, "merge consecutive SSE content deltas within this window (0=off); first token always flushes immediately")
 	poolTTL := flag.Duration("pool-ttl", 90*time.Second, "discard pooled captcha tokens older than this (-auto)")
-	poolIdle := flag.Duration("pool-idle", 3*time.Minute, "stop solving after this long without a take (-auto); 0 never idle-stops (restarts on next request)")
+	poolIdle := flag.Duration("pool-idle", 0, "stop solving after this long without a take (-auto); 0 (default) never idle-stops: the pool stays warm so the next request never pays a cold solve; a positive value trades that first-request latency (~15s cold, see runs/ttft-experiment-2026-07-21.md) for zero background solver cost")
 	captchaWait := flag.Duration("captcha-wait", 30*time.Second, "max wait for a pooled captcha token per request (0=block until ready); then 503")
 	modelRefresh := flag.Duration("model-refresh", 6*time.Hour, "re-scrape build.nvidia.com for the playground model catalog on this interval (0=fetch once at startup; <0=keep the compiled-in snapshot)")
 	modelCache := flag.String("model-cache", "models_cache.json", "JSON cache file for the live model catalog: written after every successful refresh, loaded at startup so model ids are available before/without the first fetch (empty disables)")
@@ -172,8 +172,12 @@ func main() {
 			IdleTimeout: *poolIdle,
 		}
 		pool = captcha.NewPool(ctx, powExtractTimed(), poolCfg)
+		idleDesc := "off (always warm)"
+		if *poolIdle > 0 {
+			idleDesc = poolIdle.String()
+		}
 		log.Printf("captcha pool: solver=pow (pure Go, no browser) size=%d workers=%d ttl=%s idle=%s captcha-wait=%s",
-			*poolSize, *poolWorkers, *poolTTL, *poolIdle, *captchaWait)
+			*poolSize, *poolWorkers, *poolTTL, idleDesc, *captchaWait)
 		defer pool.Close()
 	}
 
